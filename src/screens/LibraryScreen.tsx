@@ -16,6 +16,9 @@ import { PAIR_STORAGE_KEY } from "../constants/scan";
 import BiometricAnalysisPanel from "../components/BiometricAnalysisPanel";
 import ScanFootprint2D from "../components/ScanFootprint2D";
 import { useScanMetrics } from "../hooks/useScanMetrics";
+import VirtualTryOnViewer from "../components/VirtualTryOnViewer";
+import LumaStyleViewer from "../components/LumaStyleViewer";
+import { SHOE_CATALOG, type ShoeCatalogItem } from "../data/shoeCatalog";
 
 const DigitalFittingViewer = lazy(() => import("../../components/three/DigitalFittingViewer"));
 
@@ -71,6 +74,10 @@ export default function LibraryScreen({ onOpenScanner }: LibraryScreenProps) {
   const [showSuccessFx, setShowSuccessFx] = useState(false);
   /** Paio SX+DX caricato dallo scanner (sessionStorage). */
   const [pairReadyForProduction, setPairReadyForProduction] = useState(false);
+  const [arViewerOpen, setArViewerOpen] = useState(false);
+  const [arSelectedShoe, setArSelectedShoe] = useState<ShoeCatalogItem | null>(null);
+  const [lumaOpen, setLumaOpen] = useState(false);
+  const [lumaShoe, setLumaShoe] = useState<ShoeCatalogItem | null>(null);
 
   const refreshPairFlag = useCallback(() => {
     try {
@@ -139,6 +146,8 @@ export default function LibraryScreen({ onOpenScanner }: LibraryScreenProps) {
           millimetri: {
             lunghezzaMm: scanMetrics.lunghezzaMm,
             larghezzaMm: scanMetrics.larghezzaMm,
+            altezzaArcoMm: scanMetrics.altezzaArcoMm,
+            circonferenzaColloMm: scanMetrics.circonferenzaColloMm,
             volumeCm3: scanMetrics.volumeCm3,
             filamentoTpuG: FITTING_STATIC.filamentoTpuG,
           },
@@ -163,7 +172,54 @@ export default function LibraryScreen({ onOpenScanner }: LibraryScreenProps) {
       <div className="px-5 pt-5">
         <HomeScanHero onOpenScanner={onOpenScanner} />
 
-        <h1 className="mt-6 text-2xl font-bold tracking-tight text-zinc-100">Le tue scansioni</h1>
+        <section className="mt-8" aria-labelledby="catalogo-scarpe-heading">
+          <h2 id="catalogo-scarpe-heading" className="text-lg font-semibold tracking-tight text-zinc-100">
+            Catalogo modelli
+          </h2>
+          <p className="mt-1 text-sm text-zinc-400">Prova virtualmente in AR prima di personalizzare la tua scarpa.</p>
+          <div className="mt-4 grid grid-cols-2 gap-4 sm:grid-cols-2">
+            {SHOE_CATALOG.map((shoe) => (
+              <Card
+                key={shoe.id}
+                className="overflow-hidden border-zinc-800 bg-zinc-900/90 shadow-md shadow-black/20"
+              >
+                <CardContent className="space-y-3 p-4">
+                  <div className="aspect-[4/3] w-full rounded-lg border border-zinc-800 bg-gradient-to-br from-sky-950/40 to-zinc-950" />
+                  <div>
+                    <p className="font-semibold text-zinc-100">{shoe.name}</p>
+                    <p className="text-xs text-zinc-500">{shoe.subtitle}</p>
+                  </div>
+                  <div className="flex flex-col gap-2">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      className="w-full border-sky-500/40 bg-black/30 font-mono text-[10px] font-bold uppercase tracking-[0.14em] text-sky-400 hover:bg-sky-500/10 hover:text-sky-300"
+                      onClick={() => {
+                        setArSelectedShoe(shoe);
+                        setArViewerOpen(true);
+                      }}
+                    >
+                      PROVALA VIRTUALE (AR)
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      className="w-full border border-sky-500/35 bg-transparent font-mono text-[10px] font-bold uppercase tracking-[0.14em] text-sky-300/90 hover:bg-sky-500/10"
+                      onClick={() => {
+                        setLumaShoe(shoe);
+                        setLumaOpen(true);
+                      }}
+                    >
+                      Luma-style 360°
+                    </Button>
+                  </div>
+                </CardContent>
+              </Card>
+            ))}
+          </div>
+        </section>
+
+        <h1 className="mt-10 text-2xl font-bold tracking-tight text-zinc-100">Le tue scansioni</h1>
 
         <div className="relative mt-4">
           <div className="pointer-events-none absolute left-3 top-1/2 z-10 -translate-y-1/2 text-zinc-500">
@@ -364,9 +420,15 @@ export default function LibraryScreen({ onOpenScanner }: LibraryScreenProps) {
                       <span className="font-semibold text-white">{FITTING_STATIC.tagliaConsigliata}</span>
                     </div>
                     <div className="flex justify-between gap-4 border-b border-zinc-800 pb-2">
-                      <span className="text-zinc-400">Millimetri (L × L)</span>
+                      <span className="text-zinc-400">L × W (lung. × pianta)</span>
                       <span className="font-semibold text-white">
                         {scanMetrics.lunghezzaMm} × {scanMetrics.larghezzaMm} mm
+                      </span>
+                    </div>
+                    <div className="flex justify-between gap-4 border-b border-zinc-800 pb-2">
+                      <span className="text-zinc-400">Arco · Circonferenza collo</span>
+                      <span className="font-semibold text-white">
+                        {scanMetrics.altezzaArcoMm} mm · {scanMetrics.circonferenzaColloMm} mm
                       </span>
                     </div>
                     <div className="flex justify-between gap-4">
@@ -420,6 +482,26 @@ export default function LibraryScreen({ onOpenScanner }: LibraryScreenProps) {
           </div>
         </DialogContent>
       </Dialog>
+
+      <VirtualTryOnViewer
+        open={arViewerOpen}
+        shoe={arSelectedShoe}
+        onOpenChange={(next) => {
+          setArViewerOpen(next);
+          if (!next) setArSelectedShoe(null);
+        }}
+        onScanFoot={onOpenScanner}
+      />
+
+      <LumaStyleViewer
+        open={lumaOpen}
+        shoe={lumaShoe}
+        onOpenChange={(next) => {
+          setLumaOpen(next);
+          if (!next) setLumaShoe(null);
+        }}
+        onAdaptFoot={onOpenScanner}
+      />
 
       <AnimatePresence>
         {viewerOpen && showSuccessFx ? (

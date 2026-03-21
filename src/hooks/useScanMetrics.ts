@@ -9,18 +9,21 @@ function defaultPayload(): ScanMetricsPayload {
   return {
     lunghezzaMm: 265,
     larghezzaMm: 95,
+    altezzaArcoMm: 28,
+    circonferenzaColloMm: 246,
     volumeCm3: 1450,
-    circonferenzaColloMm: 66,
     left: {
       lunghezzaMm: 264,
       larghezzaMm: 98,
-      circonferenzaColloMm: 65,
+      altezzaArcoMm: 27,
+      circonferenzaColloMm: 244,
       volumeCm3: 1420,
     },
     right: {
       lunghezzaMm: 267,
       larghezzaMm: 101,
-      circonferenzaColloMm: 68,
+      altezzaArcoMm: 29,
+      circonferenzaColloMm: 248,
       volumeCm3: 1480,
     },
     scanVersion: "V6",
@@ -34,11 +37,7 @@ function readFromStorage(): ScanMetricsPayload {
     const raw = sessionStorage.getItem(SCAN_METRICS_STORAGE_KEY);
     if (!raw) return defaultPayload();
     const parsed = JSON.parse(raw) as ScanMetricsPayload;
-    if (
-      typeof parsed.lunghezzaMm !== "number" ||
-      typeof parsed.larghezzaMm !== "number" ||
-      typeof parsed.volumeCm3 !== "number"
-    ) {
+    if (typeof parsed.lunghezzaMm !== "number" || typeof parsed.larghezzaMm !== "number" || typeof parsed.volumeCm3 !== "number") {
       return defaultPayload();
     }
     const d = defaultPayload();

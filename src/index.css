@@ -146,58 +146,81 @@
   animation: hero-vivo-dot-pulse 2.4s ease-in-out infinite;
 }
 
-/* Hero: immagine piedi + mesh — effetto “si sta modellando” */
-/* Un solo fascio verticale, lento e morbido (niente doppia linea con hero-vivo) */
-@keyframes hero-feet-scan-sweep {
-  0% {
-    transform: translateY(-115%);
-    opacity: 0;
-  }
-  10% {
-    opacity: 0.85;
-  }
-  90% {
-    opacity: 0.85;
-  }
-  100% {
-    transform: translateY(115%);
-    opacity: 0;
-  }
-}
-
-.hero-feet-scan-sweep {
-  animation: hero-feet-scan-sweep 5.2s ease-in-out infinite;
-  will-change: transform;
-}
-
-@keyframes hero-feet-mesh-breathe {
+/* Scanner: bounding box blu quando piede / allineamento ok */
+@keyframes scanner-bbox-pulse {
   0%,
   100% {
-    opacity: 1;
-    filter: brightness(1.03) contrast(1.03);
+    box-shadow: 0 0 22px rgba(56, 189, 248, 0.35);
+    border-color: rgba(56, 189, 248, 0.8);
   }
   50% {
-    opacity: 1;
-    filter: brightness(1.07) contrast(1.04);
+    box-shadow: 0 0 42px rgba(56, 189, 248, 0.65);
+    border-color: rgba(125, 211, 252, 0.95);
   }
 }
 
-.hero-feet-mesh-breathe {
-  animation: hero-feet-mesh-breathe 3.2s ease-in-out infinite;
+.scanner-bbox-aligned {
+  animation: scanner-bbox-pulse 1.45s ease-in-out infinite;
 }
 
-@keyframes hero-mesh-shimmer {
-  0% {
-    opacity: 0.15;
-  }
-  50% {
-    opacity: 0.45;
-  }
+@keyframes scanner-bbox-soft {
+  0%,
   100% {
-    opacity: 0.15;
+    box-shadow: 0 0 16px rgba(56, 189, 248, 0.22);
+  }
+  50% {
+    box-shadow: 0 0 30px rgba(56, 189, 248, 0.42);
   }
 }
 
-.hero-mesh-shimmer-layer {
-  animation: hero-mesh-shimmer 2.8s ease-in-out infinite;
+.scanner-bbox-foot {
+  animation: scanner-bbox-soft 2s ease-in-out infinite;
+}
+
+/* Pin ArUco su video */
+@keyframes scanner-marker-pin {
+  0%,
+  100% {
+    transform: translate(-50%, -50%) scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: translate(-50%, -50%) scale(1.12);
+    opacity: 0.88;
+  }
+}
+
+.scanner-marker-pin {
+  animation: scanner-marker-pin 1.15s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .scanner-marker-pin {
+    animation: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .scanner-bbox-aligned,
+  .scanner-bbox-foot {
+    animation: none;
+  }
+}
+
+/* --- Sezione benefici: NO Framer opacity sui blocchi (altrimenti testo che sparisce). Colori forzati. --- */
+.barefoot-benefits .benefit-section-title,
+.barefoot-benefits .benefit-title {
+  color: #fafafa !important;
+}
+
+.barefoot-benefits .benefit-label {
+  color: #7dd3fc !important;
+}
+
+.barefoot-benefits .benefit-body {
+  color: #e4e4e7 !important;
+}
+
+.barefoot-benefits article.benefit-card {
+  opacity: 1 !important;
 }

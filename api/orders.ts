@@ -11,6 +11,8 @@ type OrderBody = {
   millimetri?: {
     lunghezzaMm?: number;
     larghezzaMm?: number;
+    altezzaArcoMm?: number;
+    circonferenzaColloMm?: number;
     volumeCm3?: number;
     filamentoTpuG?: number;
   };

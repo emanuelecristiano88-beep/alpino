@@ -8,6 +8,12 @@ import { Checkbox } from "./components/ui/checkbox";
 import { Label } from "./components/ui/label";
 import { cn } from "./lib/utils";
 import { PAIR_STORAGE_KEY, SCAN_METRICS_STORAGE_KEY } from "./constants/scan";
+import { useScanAlignmentAnalysis } from "./hooks/useScanAlignmentAnalysis";
+import { requestOrientationAccess, useDeviceTilt } from "./hooks/useDeviceTilt";
+import ScannerAlignmentOverlay from "./components/scanner/ScannerAlignmentOverlay";
+import ArucoMarkerPins from "./components/scanner/ArucoMarkerPins";
+import ScannerShutterButton from "./components/scanner/ScannerShutterButton";
+import { Smartphone } from "lucide-react";
 
 type Photo = {
   blob: Blob;
@@ -180,6 +186,7 @@ function ProcessingView({
 
 export default function ScannerCattura() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const videoContainerRef = useRef<HTMLDivElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const captureTimerRef = useRef<number | null>(null);
   const captureInFlightRef = useRef(false);
@@ -227,9 +234,26 @@ export default function ScannerCattura() {
   const [processingReady, setProcessingReady] = useState(false);
   const processingIntervalRef = useRef<number | null>(null);
   const currentFootRef = useRef<FootId>("LEFT");
+  const autoStartedPhaseRef = useRef<number>(-1);
+  const startPhaseCaptureRef = useRef<() => void>(() => {});
+  /** Evita doppio avvio fase (Strict Mode / effetto + click). */
+  const capturePhaseLockRef = useRef(false);
+  const prevCameraStateRef = useRef(cameraState);
   useEffect(() => {
     currentFootRef.current = currentFoot;
   }, [currentFoot]);
+
+  const scanOverlayEnabled = cameraState === "readyPhase" || cameraState === "capturingPhase";
+  const alignment = useScanAlignmentAnalysis(videoRef, scanOverlayEnabled, phaseIndex);
+  const { tooTilted } = useDeviceTilt(scanOverlayEnabled, 45);
+
+  useEffect(() => {
+    const prev = prevCameraStateRef.current;
+    prevCameraStateRef.current = cameraState;
+    if (cameraState === "readyPhase" && prev !== "readyPhase") {
+      capturePhaseLockRef.current = false;
+    }
+  }, [cameraState]);
 
   const overlayStep = useMemo(() => {
     return `STEP: [${phaseIndex + 1}/4] - ${phase.name}`;
@@ -409,6 +433,7 @@ export default function ScannerCattura() {
     setCapturedInPhase(0);
     cleanupPhotos();
     if (typeof sessionStorage !== "undefined") sessionStorage.removeItem(PAIR_STORAGE_KEY);
+    autoStartedPhaseRef.current = -1;
     setFlashNonce(0);
     setProcessingProgress(0);
     setProcessingScanId(null);
@@ -426,6 +451,7 @@ export default function ScannerCattura() {
 
     try {
       await acquireCameraStream();
+      void requestOrientationAccess();
       setCameraState("readyPhase");
     } catch (e: unknown) {
       const err = e as { name?: string; message?: string };
@@ -442,6 +468,7 @@ export default function ScannerCattura() {
     currentFootRef.current = "RIGHT";
     setPhaseIndex(0);
     setCapturedInPhase(0);
+    autoStartedPhaseRef.current = -1;
     setFlashNonce(0);
     setFps(0);
     setTimerSeconds(0);
@@ -449,6 +476,7 @@ export default function ScannerCattura() {
 
     try {
       await acquireCameraStream();
+      void requestOrientationAccess();
       setCameraState("readyPhase");
     } catch (e: unknown) {
       const err = e as { name?: string; message?: string };
@@ -461,6 +489,9 @@ export default function ScannerCattura() {
   const startPhaseCapture = () => {
     if (!videoRef.current) return;
     if (cameraState === "capturingPhase") return;
+    if (capturePhaseLockRef.current) return;
+    capturePhaseLockRef.current = true;
+    autoStartedPhaseRef.current = phaseIndex;
 
     setError("");
     setCapturedInPhase(0);
@@ -495,6 +526,16 @@ export default function ScannerCattura() {
       }
     }, CAPTURE_EVERY_MS);
   };
+
+  startPhaseCaptureRef.current = startPhaseCapture;
+
+  useEffect(() => {
+    if (cameraState !== "readyPhase") return;
+    if (alignment.stableAlignedMs < 1000) return;
+    if (autoStartedPhaseRef.current === phaseIndex) return;
+    if (!videoRef.current) return;
+    startPhaseCaptureRef.current();
+  }, [cameraState, alignment.stableAlignedMs, phaseIndex]);
 
   // stop phase when reached 8
   useEffect(() => {
@@ -537,6 +578,7 @@ export default function ScannerCattura() {
     setTimerSeconds(0);
     setFps(0);
     if (typeof sessionStorage !== "undefined") sessionStorage.removeItem(PAIR_STORAGE_KEY);
+    autoStartedPhaseRef.current = -1;
     setAcceptTerms(false);
     setCameraState("idle");
   };
@@ -612,25 +654,30 @@ export default function ScannerCattura() {
   };
 
   const techBadgeClass =
-    "rounded-xl border border-zinc-800 bg-zinc-900/80 px-3 py-2 font-mono text-[10px] tracking-[0.16em] text-zinc-400 backdrop-blur-md";
+    "rounded-xl border border-white/10 bg-black/40 px-3 py-2 font-mono text-[10px] tracking-[0.16em] text-zinc-300 backdrop-blur-md";
   const accentBadgeClass = "text-blue-500";
 
   const phaseCardClass =
     "w-full max-w-xl rounded-2xl border border-zinc-800 bg-zinc-900/90 p-6 shadow-xl shadow-black/40 backdrop-blur-md";
 
   return (
-    <div className="relative h-[100dvh] w-screen overflow-hidden bg-zinc-950">
+    <div className="relative h-[100dvh] w-screen overflow-hidden bg-black">
       {cameraState !== "visualizing" && (
-        <video
-          ref={videoRef}
+        <div
+          ref={videoContainerRef}
           className={cn(
-            "absolute inset-0 z-0 h-full w-full object-cover transition-opacity duration-300",
+            "absolute inset-0 z-0 overflow-hidden",
             cameraState === "betweenFeet" && "pointer-events-none opacity-0"
           )}
-          autoPlay
-          playsInline
-          muted
-        />
+        >
+          <video
+            ref={videoRef}
+            className="absolute inset-0 h-full w-full object-cover transition-opacity duration-300"
+            autoPlay
+            playsInline
+            muted
+          />
+        </div>
       )}
 
       {/* flash border */}
@@ -638,109 +685,33 @@ export default function ScannerCattura() {
         <div key={flashNonce} className="flash-border pointer-events-none" />
       )}
 
-      {/* Overlay: bordi foglio A4 + sagoma piede + avviso */}
+      {/* Overlay: bounding box + marker angoli + guida (rilevamento da frame video, estendibile con OpenCV ArUco) */}
       {(cameraState === "readyPhase" || cameraState === "capturingPhase") && (
-        <div className="absolute inset-0 z-10 flex flex-col pointer-events-none">
-          <div className="flex min-h-0 flex-1 items-center justify-center">
-            <motion.div
-              key={`foot-outline-${phaseIndex}-${currentFoot}`}
-              initial={{ opacity: 0, scale: 0.98, y: 10 }}
-              animate={{
-                opacity: 0.95,
-                scale: 1,
-                y: 0,
-                rotateX: phaseIndex === 3 ? 82 : phaseIndex === 1 ? 35 : phaseIndex === 2 ? 35 : 0,
-                rotateY: phaseIndex === 2 ? 18 : phaseIndex === 1 ? -18 : 0,
-                rotateZ: phaseIndex === 1 ? -8 : phaseIndex === 2 ? 8 : 0,
-              }}
-              transition={{ duration: 0.35, ease: "easeOut" }}
-              className="relative"
-              style={{
-                transformStyle: "preserve-3d",
-                perspective: 900,
-                height: "70vh",
-                maxHeight: 520,
-                width: "min(80vw, 420px)",
-              }}
-            >
-              <div
-                className="h-full w-full"
-                style={{
-                  transform: currentFoot === "RIGHT" ? "scaleX(-1)" : undefined,
-                  transformOrigin: "center center",
-                }}
-              >
-              <svg
-                viewBox="0 0 200 240"
-                className="h-full w-full"
-                aria-hidden="true"
-                style={{
-                  filter: "drop-shadow(0 0 8px rgba(113, 113, 122, 0.35))",
-                }}
-              >
-                <defs>
-                  <filter id="footGlow" x="-50%" y="-50%" width="200%" height="200%">
-                    <feGaussianBlur stdDeviation="2.5" result="blur" />
-                    <feMerge>
-                      <feMergeNode in="blur" />
-                      <feMergeNode in="SourceGraphic" />
-                    </feMerge>
-                  </filter>
-                </defs>
-
-                {/* Bordo foglio A4 — grigio zinc-500 (non accecante) */}
-                <rect
-                  x="28"
-                  y="12"
-                  width="144"
-                  height="204"
-                  rx="1.5"
-                  fill="none"
-                  stroke="#71717a"
-                  strokeWidth="1.25"
-                  opacity={0.85}
-                  strokeDasharray="4 3"
-                />
-
-                {/* Sagoma piede — zinc-500 */}
-                <path
-                  d="M62 58
-                     C62 36 78 26 100 26
-                     C122 26 138 36 138 58
-                     C138 90 128 114 110 130
-                     C104 135 100 140 100 146
-                     C100 152 107 170 97 186
-                     C85 206 64 196 60 174
-                     C56 152 66 138 66 130
-                     C66 121 52 104 52 86
-                     C52 70 62 66 62 58 Z"
-                  fill="none"
-                  stroke="#71717a"
-                  strokeWidth={2}
-                  opacity={0.65}
-                  filter="url(#footGlow)"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                />
-
-                <path
-                  d="M80 110
-                     C84 95 100 86 116 90"
-                  fill="none"
-                  stroke="#71717a"
-                  strokeWidth={1.7}
-                  opacity={0.5}
-                  strokeLinecap="round"
-                />
-              </svg>
-              </div>
-            </motion.div>
+        <>
+          <div className="pointer-events-none absolute inset-0 z-10 flex flex-col">
+            <ScannerAlignmentOverlay alignment={alignment} />
           </div>
-          <div className="shrink-0 px-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-1 text-center">
-            <p className="animate-a4-warning text-[11px] font-bold uppercase leading-tight tracking-wide text-amber-400/95 drop-shadow-[0_0_8px_rgba(251,191,36,0.25)]">
-              ⚠ ASSICURATI CHE I BORDI DEL FOGLIO SIANO VISIBILI.
-            </p>
-          </div>
+          <ArucoMarkerPins
+            videoRef={videoRef}
+            containerRef={videoContainerRef}
+            markerCentersNorm={alignment.markerCentersNorm}
+            visible={alignment.markerCentersNorm != null && alignment.markerCentersNorm.length >= 4}
+          />
+        </>
+      )}
+
+      {tooTilted && (cameraState === "readyPhase" || cameraState === "capturingPhase") && (
+        <div className="pointer-events-none absolute inset-0 z-[60] flex flex-col items-center justify-center bg-black/55 px-6 backdrop-blur-[2px]">
+          <motion.div
+            animate={{ rotate: [28, 0, 28] }}
+            transition={{ duration: 1.85, repeat: Infinity, ease: "easeInOut" }}
+            className="flex justify-center"
+          >
+            <Smartphone className="h-16 w-16 text-sky-400" strokeWidth={1.25} />
+          </motion.div>
+          <p className="mt-6 max-w-xs text-center font-mono text-sm font-bold uppercase tracking-[0.2em] text-sky-400">
+            TIENI IL TELEFONO VERTICALE
+          </p>
         </div>
       )}
 
@@ -776,7 +747,7 @@ export default function ScannerCattura() {
             <div
               className={cn(
                 "rounded-lg border px-4 py-2 font-mono text-[11px] font-bold uppercase tracking-[0.2em] shadow-lg backdrop-blur-md",
-                "border-zinc-800 bg-zinc-900/95 text-zinc-100 shadow-black/30"
+                "border-white/10 bg-black/40 text-zinc-100 shadow-black/30"
               )}
             >
               {currentFoot === "LEFT" ? "SCANSIONE PIEDE: SINISTRO" : "SCANSIONE PIEDE: DESTRO"}
@@ -922,61 +893,57 @@ export default function ScannerCattura() {
             </motion.div>
           )}
 
-          {(cameraState === "readyPhase" || cameraState === "capturingPhase") && (
-            <motion.div
-              key={`${cameraState}-${phaseIndex}`}
-              initial={{ opacity: 0, x: 20 }}
-              animate={{ opacity: 1, x: 0 }}
-              exit={{ opacity: 0, x: -20 }}
-              transition={{ duration: 0.22, ease: "easeOut" }}
-              className="absolute inset-0 z-50 flex items-center justify-center px-6"
-            >
-              <div className={phaseCardClass}>
-                <div className="font-mono text-xs tracking-[0.18em] text-blue-500">
-                  {overlayStep}
-                </div>
+        </AnimatePresence>
 
-                <div className="mt-4 text-center font-sans text-2xl text-zinc-100/95">
-                  {cameraState === "capturingPhase" ? "Acquisizione in corso" : phase.instruction}
-                </div>
-
-                <div className="mt-4 flex items-center justify-between gap-3">
-                  <div className="font-mono text-[10px] tracking-[0.14em] text-zinc-400">
-                    SET FOTO: {capturedInPhase}/{PHOTOS_PER_PHASE}
-                  </div>
-                  <div className="font-mono text-[10px] tracking-[0.14em] text-blue-500">
-                    {phaseIndex + 1}/4
-                  </div>
-                </div>
-
-                {/* segmented bar: 8 rectangular tacks */}
-                <div className="mt-4 flex items-center justify-center gap-2">
+        {(cameraState === "readyPhase" || cameraState === "capturingPhase") && (
+          <motion.div
+            key={`scan-bar-${phaseIndex}-${cameraState}`}
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.25, ease: "easeOut" }}
+            className="absolute bottom-0 left-0 right-0 z-[55] px-4 pb-[max(1rem,env(safe-area-inset-bottom))] pt-2"
+          >
+            <div className="rounded-t-2xl border border-white/10 bg-black/40 px-4 pb-5 pt-4 shadow-2xl backdrop-blur-md">
+              <div className="text-center font-mono text-[10px] uppercase tracking-[0.22em] text-sky-400/95">
+                {overlayStep}
+              </div>
+              <p className="mt-2 text-center text-sm leading-snug text-zinc-100/95">
+                {cameraState === "capturingPhase" ? "Acquisizione in corso…" : phase.instruction}
+              </p>
+              <div className="mt-2 flex items-center justify-center gap-4 font-mono text-[10px] tracking-wide text-zinc-400">
+                <span>
+                  Set: {capturedInPhase}/{PHOTOS_PER_PHASE}
+                </span>
+                <span className="text-sky-400/90">{phaseIndex + 1}/4</span>
+              </div>
+              <div className="mt-4 flex flex-col items-center gap-3">
+                <div className="flex items-center justify-center gap-2">
                   {progressTacks.map((filled, i) => (
                     <div
                       key={i}
-                      className={`h-2 w-5 rounded-sm border ${
+                      className={`h-1.5 w-4 rounded-sm border ${
                         filled
-                          ? "border-blue-600 bg-blue-600 shadow-[0_0_14px_rgba(37,99,235,0.45)]"
-                          : "border-zinc-700 bg-zinc-900/60"
+                          ? "border-sky-500 bg-sky-500 shadow-[0_0_12px_rgba(56,189,248,0.5)]"
+                          : "border-zinc-600/80 bg-black/30"
                       }`}
                     />
                   ))}
                 </div>
-
-                {cameraState === "readyPhase" && (
-                  <Button
-                    type="button"
-                    variant="outline"
-                    onClick={startPhaseCapture}
-                    className="mt-6 h-auto w-full rounded-xl border-zinc-800 bg-zinc-900/50 px-6 py-4 font-mono text-lg tracking-[0.14em] text-zinc-100 backdrop-blur-md hover:border-blue-500/40 hover:bg-zinc-800 hover:text-zinc-100"
-                  >
-                    INIZIA FASE {phaseIndex + 1}
-                  </Button>
-                )}
+                <ScannerShutterButton
+                  progress={activePhotosCount / TOTAL_PHOTOS}
+                  onClick={cameraState === "readyPhase" ? startPhaseCapture : undefined}
+                  disabled={cameraState === "capturingPhase"}
+                  capturing={cameraState === "capturingPhase"}
+                  label={
+                    cameraState === "capturingPhase"
+                      ? `${activePhotosCount} / ${TOTAL_PHOTOS} foto`
+                      : `Tocca · avvia fase ${phaseIndex + 1}`
+                  }
+                />
               </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
+            </div>
+          </motion.div>
+        )}
 
         {/* review */}
         {cameraState === "review" && (

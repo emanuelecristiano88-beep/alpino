@@ -5,39 +5,59 @@ import { Button } from "./ui/button";
 import type { ScanMetricsPayload, FootSideMetrics } from "../types/scanMetrics";
 
 const MM_THRESHOLD = 3;
+const CIRCONFERENZA_THRESHOLD = 5;
 const VOL_THRESHOLD = 50;
 
 function diffDetected(left: FootSideMetrics, right: FootSideMetrics) {
   return (
     Math.abs(left.lunghezzaMm - right.lunghezzaMm) > MM_THRESHOLD ||
     Math.abs(left.larghezzaMm - right.larghezzaMm) > MM_THRESHOLD ||
-    Math.abs(left.circonferenzaColloMm - right.circonferenzaColloMm) > MM_THRESHOLD ||
+    Math.abs(left.altezzaArcoMm - right.altezzaArcoMm) > MM_THRESHOLD ||
+    Math.abs(left.circonferenzaColloMm - right.circonferenzaColloMm) > CIRCONFERENZA_THRESHOLD ||
     Math.abs(left.volumeCm3 - right.volumeCm3) > VOL_THRESHOLD
   );
 }
 
-/** Percentile lineare su range antropometrico adulto (semplificato). */
+/** Percentile lineare su range antropometrico adulto (semplificato) — solo per L. */
 function lengthPercentile(mm: number) {
   const min = 220;
   const max = 310;
   return Math.min(100, Math.max(0, Math.round(((mm - min) / (max - min)) * 100)));
 }
 
-type DualRowProps = {
-  label: string;
+function barWidthMetatarsal(mm: number) {
+  return Math.min(100, (mm / 120) * 100);
+}
+/** Arco: range tipico indicativo 8–42 mm (solo visualizzazione barra). */
+function barWidthArco(mm: number) {
+  const lo = 8;
+  const hi = 42;
+  return Math.min(100, Math.max(0, ((mm - lo) / (hi - lo)) * 100));
+}
+/** Circonferenza collo / instep: range indicativo 200–300 mm. */
+function barWidthCollo(mm: number) {
+  const lo = 200;
+  const hi = 300;
+  return Math.min(100, Math.max(0, ((mm - lo) / (hi - lo)) * 100));
+}
+
+type ProRowProps = {
+  symbol: string;
+  title: string;
+  subtitle: string;
   dx: number;
   sx: number;
-  unit: "mm" | "cm³";
-  /** 0–100 riempimento barra (max dei due valori normalizzati) */
+  unit: string;
   fillPercent: number;
   showPercentile?: boolean;
   percentile?: number;
-  /** Evidenzia Dx o Sx in base al toggle (come “focus” piede). */
   highlight: "dx" | "sx";
 };
 
-function DualMetricRow({
-  label,
+function ProMetricRow({
+  symbol,
+  title,
+  subtitle,
   dx,
   sx,
   unit,
@@ -45,19 +65,22 @@ function DualMetricRow({
   showPercentile,
   percentile,
   highlight,
-}: DualRowProps) {
-  const u = unit === "mm" ? "mm" : "cm³";
+}: ProRowProps) {
   return (
     <div className="space-y-1.5">
       <div className="flex flex-col gap-0.5">
-        <span className="text-[10px] font-semibold uppercase tracking-wide text-zinc-500">{label}</span>
+        <div className="flex items-baseline gap-2">
+          <span className="font-mono text-[11px] font-bold tabular-nums text-sky-400/95">{symbol}</span>
+          <span className="text-[10px] font-semibold uppercase tracking-wide text-zinc-400">{title}</span>
+        </div>
+        <p className="text-[9px] leading-snug text-zinc-500">{subtitle}</p>
         <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 font-mono text-[11px] tabular-nums sm:text-xs">
           <span className={cn("font-semibold", highlight === "dx" ? "text-sky-300" : "text-zinc-300")}>
-            Dx {dx} {u}
+            Dx {dx} {unit}
           </span>
           <span className="text-zinc-600">|</span>
           <span className={cn("font-semibold", highlight === "sx" ? "text-sky-300" : "text-zinc-300")}>
-            Sx {sx} {u}
+            Sx {sx} {unit}
           </span>
           {showPercentile && percentile !== undefined ? (
             <span className="ml-auto text-[10px] font-normal text-blue-400/90">P{percentile}</span>
@@ -77,14 +100,13 @@ function DualMetricRow({
 export type BiometricAnalysisPanelProps = {
   metrics: ScanMetricsPayload;
   className?: string;
-  /** Se true, non mostra il bottone Conferma (es. bottone esterno al card). */
   hideConfirmButton?: boolean;
   onConfirm?: () => void;
   confirmLabel?: string;
 };
 
 /**
- * Pannello destro: Confronto / Comparison con Before/After, Dx|Sx sulla stessa riga, barre e alert differenze.
+ * Confronto biometrico professionale: L, W, altezza arco, circonferenza collo (da mesh 3D / script Mac).
  */
 export default function BiometricAnalysisPanel({
   metrics,
@@ -104,38 +126,47 @@ export default function BiometricAnalysisPanel({
   const lungPctBar = Math.max(lungPctDx, lungPctSx);
 
   const rows = useMemo(
-    () => [
-      {
-        label: "Lunghezza",
-        dx: R.lunghezzaMm,
-        sx: L.lunghezzaMm,
-        unit: "mm" as const,
-        fillPercent: lungPctBar,
-        showPercentile: true,
-        percentile: Math.round((lungPctDx + lungPctSx) / 2),
-      },
-      {
-        label: "Larghezza avampiede",
-        dx: R.larghezzaMm,
-        sx: L.larghezzaMm,
-        unit: "mm" as const,
-        fillPercent: Math.min(100, (Math.max(R.larghezzaMm, L.larghezzaMm) / 120) * 100),
-      },
-      {
-        label: "Circonferenza collo",
-        dx: R.circonferenzaColloMm,
-        sx: L.circonferenzaColloMm,
-        unit: "mm" as const,
-        fillPercent: Math.min(100, (Math.max(R.circonferenzaColloMm, L.circonferenzaColloMm) / 100) * 100),
-      },
-      {
-        label: "Volume stimato",
-        dx: R.volumeCm3,
-        sx: L.volumeCm3,
-        unit: "cm³" as const,
-        fillPercent: Math.min(100, (Math.max(R.volumeCm3, L.volumeCm3) / 2000) * 100),
-      },
-    ],
+    () =>
+      [
+        {
+          symbol: "L",
+          title: "Lunghezza totale",
+          subtitle: "Dal tallone alla punta del dito più lungo (mesh 3D).",
+          dx: R.lunghezzaMm,
+          sx: L.lunghezzaMm,
+          unit: "mm",
+          fillPercent: lungPctBar,
+          showPercentile: true,
+          percentile: Math.round((lungPctDx + lungPctSx) / 2),
+        },
+        {
+          symbol: "W",
+          title: "Larghezza metatarsale",
+          subtitle: "Punto più largo della pianta — riferimento avampiede.",
+          dx: R.larghezzaMm,
+          sx: L.larghezzaMm,
+          unit: "mm",
+          fillPercent: Math.max(barWidthMetatarsal(R.larghezzaMm), barWidthMetatarsal(L.larghezzaMm)),
+        },
+        {
+          symbol: "H",
+          title: "Altezza arco",
+          subtitle: "Profilo plantare: utile per classificare piede più piatto o più cavo.",
+          dx: R.altezzaArcoMm,
+          sx: L.altezzaArcoMm,
+          unit: "mm",
+          fillPercent: Math.max(barWidthArco(R.altezzaArcoMm), barWidthArco(L.altezzaArcoMm)),
+        },
+        {
+          symbol: "C",
+          title: "Circonferenza collo",
+          subtitle: "Per calibrare quanto deve essere stretta la tomaia stampata in TPU.",
+          dx: R.circonferenzaColloMm,
+          sx: L.circonferenzaColloMm,
+          unit: "mm",
+          fillPercent: Math.max(barWidthCollo(R.circonferenzaColloMm), barWidthCollo(L.circonferenzaColloMm)),
+        },
+      ],
     [L, R, lungPctBar, lungPctDx, lungPctSx]
   );
 
@@ -149,6 +180,9 @@ export default function BiometricAnalysisPanel({
       <div className="mb-3 text-center">
         <h3 className="font-mono text-[11px] font-bold uppercase tracking-[0.2em] text-zinc-200">Confronto</h3>
         <p className="mt-0.5 text-[10px] font-medium uppercase tracking-[0.25em] text-zinc-500">Comparison</p>
+        <p className="mx-auto mt-2 max-w-[260px] text-[9px] leading-relaxed text-zinc-500">
+          Valori da mesh 3D (pipeline Mac). Simboli: L lunghezza, W pianta, H arco, C tomaia.
+        </p>
       </div>
 
       <div className="mb-3 flex rounded-full border border-zinc-800 bg-zinc-950/80 p-0.5">
@@ -174,14 +208,16 @@ export default function BiometricAnalysisPanel({
         </button>
       </div>
       <p className="mb-3 text-center text-[10px] text-zinc-500">
-        {mode === "after" ? "Focus piede destro (Dx)" : "Focus piede sinistro (Sx)"} · dati da ultima scansione
+        {mode === "after" ? "Focus piede destro (Dx)" : "Focus piede sinistro (Sx)"} · ultima scansione
       </p>
 
       <div className="min-h-0 flex-1 space-y-4 overflow-y-auto pr-1">
         {rows.map((r) => (
-          <DualMetricRow
-            key={r.label}
-            label={r.label}
+          <ProMetricRow
+            key={r.symbol}
+            symbol={r.symbol}
+            title={r.title}
+            subtitle={r.subtitle}
             dx={r.dx}
             sx={r.sx}
             unit={r.unit}
@@ -201,7 +237,10 @@ export default function BiometricAnalysisPanel({
           <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" aria-hidden />
           <span>
             <strong className="font-semibold tracking-wide">DIFFERENZA RILEVATA</strong>
-            <span className="text-amber-200/90"> — i due piedi differiscono di oltre 3 mm su almeno una misura chiave.</span>
+            <span className="text-amber-200/90">
+              {" "}
+              — i due piedi differiscono oltre soglia su lunghezza, larghezza, arco o circonferenza collo.
+            </span>
           </span>
         </div>
       ) : null}

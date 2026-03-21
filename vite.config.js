@@ -53,6 +53,11 @@ function apiOrdersDevPlugin() {
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [react(), ...(useDevHttps ? [basicSsl()] : []), apiOrdersDevPlugin()],
+  /** WASM + import.meta.url nel pacchetto ArUco: evita pre-bundle che rompe il .wasm */
+  optimizeDeps: {
+    exclude: ['@ar-js-org/aruco-rs'],
+    include: ['@google/model-viewer'],
+  },
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),

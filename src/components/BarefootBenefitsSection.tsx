@@ -1,7 +1,6 @@
 "use client";
 
 import React from "react";
-import { motion } from "framer-motion";
 import { cn } from "../lib/utils";
 
 /** Striscia orizzontale: 5 pannelli uguali (screenshot composito) */
@@ -95,37 +94,31 @@ export default function BarefootBenefitsSection({ className }: BarefootBenefitsS
     <section
       id="benefici-piede"
       className={cn(
-        "scroll-mt-24 border-t border-zinc-800/80 bg-zinc-950 px-5 pb-8 pt-10 sm:scroll-mt-28",
-        /* Colori espliciti: evita testo grigio su nero se il cascade CSS cambia */
-        "[&_article]:text-[#fafafa]",
+        "barefoot-benefits scroll-mt-24 border-t border-zinc-800/80 bg-zinc-950 px-5 pb-8 pt-10 sm:scroll-mt-28",
         className
       )}
       aria-labelledby="barefoot-benefits-heading"
     >
       <h2
         id="barefoot-benefits-heading"
-        className="mb-8 max-w-3xl text-2xl font-semibold tracking-tight !text-[#fafafa] sm:text-3xl"
+        className="benefit-section-title mb-8 max-w-3xl text-2xl font-semibold tracking-tight sm:text-3xl"
       >
         I benefici del vivere a piedi nudi
       </h2>
 
       <div className="grid grid-cols-1 gap-8 sm:grid-cols-2 xl:grid-cols-5 xl:gap-6">
-        {BENEFITS.map(({ id, panelIndex, label, title, body, imageAlt }, i) => (
-          <motion.article
+        {BENEFITS.map(({ id, panelIndex, label, title, body, imageAlt }) => (
+          <article
             key={id}
-            initial={{ opacity: 0, y: 16 }}
-            whileInView={{ opacity: 1, y: 0 }}
-            viewport={{ once: true, margin: "-40px" }}
-            transition={{ duration: 0.45, delay: i * 0.05, ease: [0.22, 1, 0.36, 1] }}
-            className="flex flex-col border-b border-zinc-800/60 pb-8 last:border-b-0 sm:border-b-0 sm:pb-0 xl:border-0"
+            className="benefit-card flex flex-col border-b border-zinc-800/60 pb-8 last:border-b-0 sm:border-b-0 sm:pb-0 xl:border-0"
           >
             <div className="relative mb-4 aspect-square w-full overflow-hidden rounded-xl shadow-lg shadow-black/50">
               <BenefitStripPanel panelIndex={panelIndex} alt={imageAlt} />
             </div>
-            <p className="mb-2 font-mono text-[10px] font-semibold uppercase tracking-wider !text-sky-300">{label}</p>
-            <h3 className="mb-2 text-base font-semibold leading-snug !text-[#fafafa]">{title}</h3>
-            <p className="text-sm font-normal leading-relaxed !text-[#e4e4e7]">{body}</p>
-          </motion.article>
+            <p className="benefit-label mb-2 font-mono text-[10px] font-semibold uppercase tracking-wider">{label}</p>
+            <h3 className="benefit-title mb-2 text-base font-semibold leading-snug">{title}</h3>
+            <p className="benefit-body text-sm font-normal leading-relaxed">{body}</p>
+          </article>
         ))}
       </div>
     </section>
