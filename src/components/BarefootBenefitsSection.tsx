@@ -58,24 +58,24 @@ const BENEFITS: {
 
 /**
  * Un pannello della striscia (5 colonne uguali nell’immagine sorgente).
- * mix-blend-multiply integra lo sfondo chiaro nel tema scuro (come l’hero).
+ * Sfondo chiaro + niente multiply: le foto restano visibili sul tema dark.
  */
 function BenefitStripPanel({ panelIndex, alt }: { panelIndex: number; alt: string }) {
   return (
-    <div className="relative isolate h-full min-h-[200px] w-full bg-zinc-900">
+    <div className="relative isolate h-full min-h-[200px] w-full overflow-hidden rounded-lg bg-gradient-to-b from-zinc-100 to-zinc-200">
       <img
         src={BENEFITS_STRIP_IMG}
         alt={alt}
         width={2500}
         height={500}
-        className="absolute left-0 top-0 h-full w-[500%] max-w-none object-cover object-center mix-blend-multiply"
+        className="absolute left-0 top-0 h-full w-[500%] max-w-none object-cover object-center brightness-[1.02] contrast-[1.02]"
         style={{
           transform: `translateX(-${panelIndex * 20}%)`,
         }}
         loading="lazy"
         decoding="async"
       />
-      <div className="pointer-events-none absolute inset-0 rounded-lg shadow-[inset_0_0_24px_rgba(0,0,0,0.35)]" />
+      <div className="pointer-events-none absolute inset-0 rounded-lg ring-1 ring-inset ring-black/5 shadow-[inset_0_0_20px_rgba(255,255,255,0.2)]" />
     </div>
   );
 }
@@ -92,7 +92,7 @@ export default function BarefootBenefitsSection({ className }: BarefootBenefitsS
     <section
       id="benefici-piede"
       className={cn(
-        "scroll-mt-24 border-t border-zinc-800/80 bg-zinc-950/80 px-5 pb-8 pt-10 sm:scroll-mt-28",
+        "scroll-mt-24 border-t border-zinc-800/80 bg-zinc-950 px-5 pb-8 pt-10 sm:scroll-mt-28",
         className
       )}
       aria-labelledby="barefoot-benefits-heading"
@@ -110,12 +110,12 @@ export default function BarefootBenefitsSection({ className }: BarefootBenefitsS
             key={id}
             className="flex flex-col border-b border-zinc-800/60 pb-8 last:border-b-0 sm:border-b-0 sm:pb-0 xl:border-0"
           >
-            <div className="relative mb-4 aspect-square w-full overflow-hidden rounded-lg border border-zinc-800 bg-zinc-900 shadow-inner ring-1 ring-white/5">
+            <div className="relative mb-4 aspect-square w-full overflow-hidden rounded-lg border border-zinc-700/80 shadow-md shadow-black/30 ring-1 ring-white/5">
               <BenefitStripPanel panelIndex={panelIndex} alt={imageAlt} />
             </div>
-            <p className="mb-2 font-mono text-[10px] font-medium uppercase tracking-wider text-blue-400/90">{label}</p>
-            <h3 className="mb-2 text-base font-semibold leading-snug text-zinc-100">{title}</h3>
-            <p className="text-sm leading-relaxed text-zinc-400">{body}</p>
+            <p className="mb-2 font-mono text-[10px] font-medium uppercase tracking-wider text-blue-400">{label}</p>
+            <h3 className="mb-2 text-base font-semibold leading-snug text-zinc-50">{title}</h3>
+            <p className="text-sm leading-relaxed text-zinc-300">{body}</p>
           </article>
         ))}
       </div>

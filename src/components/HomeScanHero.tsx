@@ -7,7 +7,7 @@ import { HoneycombLatticeVisual } from "./HoneycombLatticeVisual";
 import { ChevronDown, ScanLine } from "lucide-react";
 import BarefootBenefitsSection from "./BarefootBenefitsSection";
 
-/** Immagine piedi 3D + mesh (sfondo bianco rimosso in CSS con blend su dark) */
+/** Immagine piedi 3D + mesh — su pannello chiaro per contrasto (no mix-blend: altrimenti troppo scura) */
 const FEET_MESH_IMG = "/images/feet-mesh-modeling.png";
 
 export type HomeScanHeroProps = {
@@ -73,8 +73,8 @@ export default function HomeScanHero({ onOpenScanner }: HomeScanHeroProps) {
           </div>
         </motion.div>
 
-        <p className="relative z-10 mt-3 max-w-lg text-center text-xs text-zinc-500">
-          Sfondo bianco dell’immagine integrato nel tema scuro; animazione simula scansione e costruzione mesh.
+        <p className="relative z-10 mt-3 max-w-lg text-center text-xs text-zinc-400">
+          Pannello chiaro per far risaltare foto e mesh; animazione simula scansione e costruzione.
         </p>
       </div>
 

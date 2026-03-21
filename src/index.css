@@ -171,12 +171,12 @@
 @keyframes hero-feet-mesh-breathe {
   0%,
   100% {
-    opacity: 0.88;
-    filter: brightness(1) contrast(1.02);
+    opacity: 1;
+    filter: brightness(1.03) contrast(1.03);
   }
   50% {
     opacity: 1;
-    filter: brightness(1.06) contrast(1.05);
+    filter: brightness(1.07) contrast(1.04);
   }
 }
 
