@@ -91,3 +91,53 @@
 .honeycomb-cell {
   animation: honeycomb-elastic 2.8s ease-in-out infinite;
 }
+
+/* Home hero — stile scan / mesh (SVG, no WebGL) */
+@keyframes hero-vivo-scan {
+  0% {
+    transform: translateY(-100%);
+    opacity: 0;
+  }
+  15% {
+    opacity: 1;
+  }
+  85% {
+    opacity: 1;
+  }
+  100% {
+    transform: translateY(220%);
+    opacity: 0;
+  }
+}
+
+.hero-vivo-scan-beam {
+  animation: hero-vivo-scan 4.2s ease-in-out infinite;
+}
+
+@keyframes hero-vivo-mesh {
+  0%,
+  100% {
+    opacity: 0.55;
+  }
+  50% {
+    opacity: 0.95;
+  }
+}
+
+.hero-vivo-mesh-pulse {
+  animation: hero-vivo-mesh 3s ease-in-out infinite;
+}
+
+@keyframes hero-vivo-dot-pulse {
+  0%,
+  100% {
+    opacity: 0.45;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+.hero-vivo-dot {
+  animation: hero-vivo-dot-pulse 2.4s ease-in-out infinite;
+}

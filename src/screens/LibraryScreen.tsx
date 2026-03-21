@@ -3,8 +3,8 @@
 import React, { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Search, ChevronDown, Plus, MoreHorizontal, X, CheckCircle2 } from "lucide-react";
-
-const DigitalFittingViewer = lazy(() => import("../../components/three/DigitalFittingViewer"));
+import HomeScanHero from "../components/HomeScanHero";
+import BarefootBenefitsSection from "../components/BarefootBenefitsSection";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
 import { Card, CardContent, CardFooter } from "../components/ui/card";
@@ -15,6 +15,8 @@ import { Slider } from "../components/ui/slider";
 import { cn } from "../lib/utils";
 import { PAIR_STORAGE_KEY } from "../constants/scan";
 import BiometricComparisonDashboard from "../components/BiometricComparisonDashboard";
+
+const DigitalFittingViewer = lazy(() => import("../../components/three/DigitalFittingViewer"));
 
 const FITTING_DATA = {
   volumeCm3: 1450,
@@ -148,7 +150,11 @@ export default function LibraryScreen({ onOpenScanner }: LibraryScreenProps) {
   return (
     <div className="min-h-[100dvh] bg-zinc-950 pb-28 text-zinc-100">
       <div className="px-5 pt-5">
-        <h1 className="text-2xl font-bold tracking-tight text-zinc-100">Library</h1>
+        <HomeScanHero onOpenScanner={onOpenScanner} />
+
+        <BarefootBenefitsSection />
+
+        <h1 className="mt-4 text-2xl font-bold tracking-tight text-zinc-100">Le tue scansioni</h1>
 
         <div className="relative mt-4">
           <div className="pointer-events-none absolute left-3 top-1/2 z-10 -translate-y-1/2 text-zinc-500">

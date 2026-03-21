@@ -14,7 +14,7 @@ import { ALPINO_UI_BUILD_ID } from "./config/build";
 type TabId = "library" | "albums" | "explore" | "menu";
 
 const NAV_ITEMS: { id: TabId; label: string; Icon: React.ComponentType<{ className?: string; strokeWidth?: number }> }[] = [
-  { id: "library", label: "Library", Icon: Book },
+  { id: "library", label: "Home", Icon: Book },
   { id: "albums", label: "Albums", Icon: Folder },
   { id: "explore", label: "Explore", Icon: Globe },
   { id: "menu", label: "Menu", Icon: MenuIcon },
