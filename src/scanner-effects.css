@@ -1,0 +1,231 @@
+/* Effetti scanner / fotocamera — accenti blu su flash */
+
+.analysis-grid {
+  background-image:
+    linear-gradient(to right, hsl(221 83% 53% / 0.35) 1px, transparent 1px),
+    linear-gradient(to bottom, hsl(221 83% 53% / 0.3) 1px, transparent 1px);
+  background-size: 36px 36px;
+  animation: grid-scan 1.8s linear infinite;
+}
+
+.live-mm-grid {
+  background-image:
+    linear-gradient(to right, hsl(221 83% 53% / 0.32) 1px, transparent 1px),
+    linear-gradient(to bottom, hsl(221 83% 53% / 0.28) 1px, transparent 1px),
+    linear-gradient(to right, hsl(221 83% 53% / 0.14) 1px, transparent 1px),
+    linear-gradient(to bottom, hsl(221 83% 53% / 0.1) 1px, transparent 1px);
+  background-size: 50px 50px, 50px 50px, 10px 10px, 10px 10px;
+  mix-blend-mode: screen;
+}
+
+.scan-foot-outline {
+  border: 2px solid hsl(221 83% 53% / 0.8);
+  border-radius: 46% 46% 38% 38% / 54% 54% 28% 28%;
+  box-shadow:
+    0 0 14px hsl(221 83% 53% / 0.7),
+    inset 0 0 18px hsl(221 83% 53% / 0.25);
+  background: linear-gradient(
+    to bottom,
+    hsl(221 83% 53% / 0.08),
+    hsl(221 83% 53% / 0.03) 35%,
+    hsl(221 83% 53% / 0.08)
+  );
+}
+
+.scan-foot-outline::before {
+  content: "";
+  position: absolute;
+  left: 20%;
+  right: 20%;
+  bottom: -2px;
+  height: 26%;
+  border: 1px dashed hsl(221 83% 53% / 0.7);
+  border-top: none;
+  border-radius: 0 0 45% 45%;
+}
+
+.record-target-dot {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 16px;
+  height: 16px;
+  transform: translate(-50%, -50%);
+  border-radius: 9999px;
+  background: hsl(221 83% 53% / 0.85);
+  box-shadow:
+    0 0 10px hsl(221 83% 53% / 0.95),
+    0 0 22px hsl(221 83% 53% / 0.55);
+  animation: target-pulse 1.1s ease-in-out infinite;
+}
+
+@keyframes target-pulse {
+  0% {
+    transform: translate(-50%, -50%) scale(0.85);
+    opacity: 0.8;
+  }
+  50% {
+    transform: translate(-50%, -50%) scale(1.05);
+    opacity: 1;
+  }
+  100% {
+    transform: translate(-50%, -50%) scale(0.85);
+    opacity: 0.8;
+  }
+}
+
+.record-scan-sweep {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.record-scan-sweep::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: -25%;
+  width: 2px;
+  height: 30%;
+  transform: translateX(-50%);
+  background: linear-gradient(
+    to bottom,
+    hsl(221 83% 53% / 0),
+    hsl(221 83% 53%),
+    hsl(221 83% 53% / 0)
+  );
+  box-shadow:
+    0 0 14px hsl(221 83% 53% / 0.95),
+    0 0 40px hsl(221 83% 53% / 0.5);
+  animation: sweep-y 1.25s linear infinite;
+}
+
+@keyframes sweep-y {
+  0% {
+    transform: translate(-50%, 0);
+    opacity: 0.95;
+  }
+  100% {
+    transform: translate(-50%, 250%);
+    opacity: 0.2;
+  }
+}
+
+.laser-sweep {
+  position: absolute;
+  inset: 0;
+}
+
+.laser-sweep::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: -28%;
+  width: 4px;
+  height: 28%;
+  transform: translateX(-50%);
+  background: linear-gradient(
+    to bottom,
+    hsl(221 83% 53% / 0),
+    hsl(221 83% 53%),
+    hsl(221 83% 53% / 0)
+  );
+  box-shadow:
+    0 0 14px hsl(221 83% 53%),
+    0 0 34px hsl(221 83% 53% / 0.8),
+    0 0 64px hsl(221 83% 53% / 0.55);
+  animation: laser-sweep-y 2s linear infinite;
+}
+
+.laser-sweep::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: -2px;
+  width: 100%;
+  height: 2px;
+  background: hsl(221 83% 53% / 0.85);
+  box-shadow:
+    0 0 12px hsl(221 83% 53%),
+    0 0 24px hsl(221 83% 53% / 0.7);
+  animation: laser-sweep-line 2s linear infinite;
+}
+
+@keyframes grid-scan {
+  from {
+    background-position: 0 0, 0 0;
+  }
+  to {
+    background-position: 0 36px, 36px 0;
+  }
+}
+
+@keyframes laser-sweep-y {
+  from {
+    transform: translate(-50%, 0);
+  }
+  to {
+    transform: translate(-50%, 460%);
+  }
+}
+
+@keyframes laser-sweep-line {
+  from {
+    transform: translateY(0);
+  }
+  to {
+    transform: translateY(calc(100vh + 2px));
+  }
+}
+
+.flash-border {
+  position: absolute;
+  inset: 0;
+  border: 0 solid rgba(255, 255, 255, 0);
+  pointer-events: none;
+}
+
+.flash-border::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border: 10px solid rgba(255, 255, 255, 0);
+  background: rgba(255, 255, 255, 0);
+  animation: flash-border 120ms ease-out both;
+}
+
+@keyframes flash-border {
+  0% {
+    border-color: rgba(37, 99, 235, 0);
+    background: rgba(37, 99, 235, 0);
+  }
+  20% {
+    border-color: rgba(59, 130, 246, 0.85);
+    background: rgba(37, 99, 235, 0.12);
+  }
+  100% {
+    border-color: rgba(37, 99, 235, 0);
+    background: rgba(37, 99, 235, 0);
+  }
+}
+
+/* Nessun @layer qui: questo file è importato dopo index.css e Tailwind non ripete @tailwind in ogni chunk. */
+.bg-grid-tech {
+  background-size: 20px 20px;
+  background-image:
+    linear-gradient(to right, hsl(221 83% 53% / 0.08) 1px, transparent 1px),
+    linear-gradient(to bottom, hsl(221 83% 53% / 0.08) 1px, transparent 1px);
+  background-position: center center;
+}
+
+.bg-vignette-scanlines {
+  background:
+    radial-gradient(circle at center, transparent 30%, rgba(0, 0, 0, 0.4) 100%),
+    repeating-linear-gradient(
+      0deg,
+      rgba(0, 0, 0, 0.03) 0px,
+      rgba(0, 0, 0, 0.03) 1px,
+      transparent 1px,
+      transparent 2px
+    );
+}

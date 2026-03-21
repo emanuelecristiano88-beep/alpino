@@ -1,0 +1,93 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Shadcn / Zinc — preset dark di default, radius 0.75rem, font Inter (sans) */
+@layer base {
+  :root {
+    --radius: 0.75rem;
+    --background: 0 0% 100%;
+    --foreground: 240 10% 3.9%;
+    --card: 0 0% 100%;
+    --card-foreground: 240 10% 3.9%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 240 10% 3.9%;
+    /* Blu fisso (Tailwind blue-600) — mai dipendere da variabile sovrascritta */
+    --primary: 221 83% 53%;
+    --primary-foreground: 0 0% 98%;
+    --secondary: 240 4.8% 95.9%;
+    --secondary-foreground: 240 5.9% 10%;
+    --muted: 240 4.8% 95.9%;
+    --muted-foreground: 240 3.8% 46.1%;
+    --accent: 240 4.8% 95.9%;
+    --accent-foreground: 240 5.9% 10%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 240 5.9% 90%;
+    --input: 240 5.9% 90%;
+    --ring: 240 5.9% 10%;
+  }
+
+  /* Dark totale: zinc-950 / zinc-900 / zinc-800, accenti blu (sovrascritti da ThemeProvider con --primary) */
+  .dark {
+    --background: 240 10% 3.9%;
+    --foreground: 240 5% 96.1%;
+    --card: 240 5.9% 9.8%;
+    --card-foreground: 240 5% 96.1%;
+    --popover: 240 5.9% 9.8%;
+    --popover-foreground: 240 5% 96.1%;
+    --primary: 221 83% 53%;
+    --primary-foreground: 0 0% 98%;
+    --secondary: 240 3.7% 15.9%;
+    --secondary-foreground: 240 5% 96.1%;
+    --muted: 240 3.7% 15.9%;
+    --muted-foreground: 240 5% 64.9%;
+    --accent: 240 3.7% 15.9%;
+    --accent-foreground: 240 5% 96.1%;
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 240 3.7% 15.9%;
+    --input: 240 3.7% 15.9%;
+    --ring: 217 91% 60%;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply min-h-[100dvh] bg-background font-sans text-foreground antialiased;
+    margin: 0;
+  }
+}
+
+@layer utilities {
+  .animate-a4-warning {
+    animation: a4-warning-blink 1.15s ease-in-out infinite;
+  }
+}
+
+@keyframes a4-warning-blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.22;
+  }
+}
+
+/* Reticolo nido d'ape — Tecnologia TPU */
+@keyframes honeycomb-elastic {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+.honeycomb-cell {
+  animation: honeycomb-elastic 2.8s ease-in-out infinite;
+}
