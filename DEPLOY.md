@@ -6,7 +6,7 @@ Se sul sito vedi ancora **verde** o **Bambu**:
 
 1. **Conferma il deploy**  
    Nel **Menu** deve apparire una riga grigia piccola:  
-   `Build: 2026-03-21-blue-ui — se non vedi questa riga...`  
+   `Build: 2026-03-19-vercel-blue-check — se non vedi questa riga...`  
    - Se **non** la vedi → Vercel sta collegato a **un altro repo**, **un altro branch** o **Root Directory** sbagliata.
 2. **Vercel Dashboard** → progetto → **Settings → Git**  
    Controlla repository, branch di produzione e **Root Directory** (deve essere la cartella dove c’è `package.json` di questo progetto).
