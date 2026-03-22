@@ -100,7 +100,7 @@ export default function LibraryScreen({ onOpenScanner }: LibraryScreenProps) {
 
   const items: ScanItem[] = useMemo(
     () =>
-      Array.from({ length: 6 }, (_, i) => ({
+      Array.from({ length: 2 }, (_, i) => ({
         id: `scan-${i + 1}`,
         dateLabel: "20 mar 2026",
         thumbSeed: i + 1,
@@ -181,12 +181,18 @@ export default function LibraryScreen({ onOpenScanner }: LibraryScreenProps) {
                 className="overflow-hidden border-zinc-800 bg-zinc-900/90 shadow-md shadow-black/20"
               >
                 <CardContent className="space-y-3 p-4">
-                  <div className="relative aspect-[4/3] w-full overflow-hidden rounded-lg border border-zinc-800 bg-gradient-to-br from-sky-950/40 to-zinc-950">
+                  <div
+                    className={cn(
+                      "relative flex aspect-[4/3] w-full items-center justify-center overflow-hidden rounded-lg border border-zinc-800",
+                      "bg-gradient-to-br from-sky-950/40 to-zinc-950"
+                    )}
+                  >
                     {shoe.previewSrc ? (
                       <img
                         src={shoe.previewSrc}
                         alt={shoe.name}
-                        className="h-full w-full object-contain object-center"
+                        className="max-h-full max-w-full object-contain object-center"
+                        loading="lazy"
                       />
                     ) : null}
                   </div>
