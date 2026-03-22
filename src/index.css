@@ -210,20 +210,7 @@
   }
 }
 
-/* --- Sezione benefici: NO Framer opacity sui blocchi (altrimenti testo che sparisce). Colori forzati. --- */
-.barefoot-benefits .benefit-section-title,
-.barefoot-benefits .benefit-title {
-  color: #fafafa !important;
-}
-
-.barefoot-benefits .benefit-label {
-  color: #7dd3fc !important;
-}
-
-.barefoot-benefits .benefit-body {
-  color: #e4e4e7 !important;
-}
-
+/* --- Sezione benefici: NO Framer opacity sui blocchi (altrimenti testo che sparisce). --- */
 .barefoot-benefits article.benefit-card {
   opacity: 1 !important;
 }

@@ -58,12 +58,12 @@ const BENEFITS: {
 
 /**
  * Un pannello della striscia (5 colonne uguali nell’immagine sorgente).
- * Sfondo chiaro + niente multiply: le foto restano visibili sul tema dark.
+ * Cornice grigia allineata al resto della pagina.
  */
 function BenefitStripPanel({ panelIndex, alt }: { panelIndex: number; alt: string }) {
   return (
-    <div className="relative h-full min-h-[200px] w-full rounded-lg bg-zinc-800/90 p-[3px] shadow-inner shadow-black/40 ring-1 ring-zinc-700/80">
-      <div className="relative isolate h-full min-h-[196px] w-full overflow-hidden rounded-md bg-gradient-to-b from-zinc-200 to-zinc-300/95">
+    <div className="relative h-full min-h-[200px] w-full rounded-lg border border-neutral-300 bg-neutral-200 p-[3px] shadow-sm">
+      <div className="relative isolate h-full min-h-[196px] w-full overflow-hidden rounded-md bg-neutral-200">
         <img
           src={BENEFITS_STRIP_IMG}
           alt={alt}
@@ -76,7 +76,7 @@ function BenefitStripPanel({ panelIndex, alt }: { panelIndex: number; alt: strin
           loading="lazy"
           decoding="async"
         />
-        <div className="pointer-events-none absolute inset-0 rounded-md ring-1 ring-inset ring-black/10 shadow-[inset_0_0_20px_rgba(15,23,42,0.08)]" />
+        <div className="pointer-events-none absolute inset-0 rounded-md ring-1 ring-inset ring-neutral-300/80" />
       </div>
     </div>
   );
@@ -94,14 +94,14 @@ export default function BarefootBenefitsSection({ className }: BarefootBenefitsS
     <section
       id="benefici-piede"
       className={cn(
-        "barefoot-benefits scroll-mt-24 border-t border-zinc-800/80 bg-zinc-950 px-5 pb-8 pt-10 sm:scroll-mt-28",
+        "barefoot-benefits scroll-mt-24 border-t border-neutral-300 bg-neutral-200 px-5 pb-8 pt-10 sm:scroll-mt-28",
         className
       )}
       aria-labelledby="barefoot-benefits-heading"
     >
       <h2
         id="barefoot-benefits-heading"
-        className="benefit-section-title mb-8 max-w-3xl text-2xl font-semibold tracking-tight sm:text-3xl"
+        className="benefit-section-title mb-8 max-w-3xl text-2xl font-semibold tracking-tight text-zinc-900 sm:text-3xl"
       >
         I benefici del vivere a piedi nudi
       </h2>
@@ -110,14 +110,16 @@ export default function BarefootBenefitsSection({ className }: BarefootBenefitsS
         {BENEFITS.map(({ id, panelIndex, label, title, body, imageAlt }) => (
           <article
             key={id}
-            className="benefit-card flex flex-col border-b border-zinc-800/60 pb-8 last:border-b-0 sm:border-b-0 sm:pb-0 xl:border-0"
+            className="benefit-card flex flex-col border-b border-neutral-300 pb-8 last:border-b-0 sm:border-b-0 sm:pb-0 xl:border-0"
           >
-            <div className="relative mb-4 aspect-square w-full overflow-hidden rounded-xl shadow-lg shadow-black/50">
+            <div className="relative mb-4 aspect-square w-full overflow-hidden rounded-xl border border-neutral-200 bg-neutral-200 shadow-sm">
               <BenefitStripPanel panelIndex={panelIndex} alt={imageAlt} />
             </div>
-            <p className="benefit-label mb-2 font-mono text-[10px] font-semibold uppercase tracking-wider">{label}</p>
-            <h3 className="benefit-title mb-2 text-base font-semibold leading-snug">{title}</h3>
-            <p className="benefit-body text-sm font-normal leading-relaxed">{body}</p>
+            <p className="benefit-label mb-2 font-mono text-[10px] font-semibold uppercase tracking-wider text-blue-700">
+              {label}
+            </p>
+            <h3 className="benefit-title mb-2 text-base font-semibold leading-snug text-zinc-900">{title}</h3>
+            <p className="benefit-body text-sm font-normal leading-relaxed text-zinc-700">{body}</p>
           </article>
         ))}
       </div>
