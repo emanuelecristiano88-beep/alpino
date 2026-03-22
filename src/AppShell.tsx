@@ -17,6 +17,7 @@ import {
 import ScannerCattura from "./ScannerCattura";
 import LibraryScreen from "./screens/LibraryScreen";
 import NeumaOnboarding from "./components/NeumaOnboarding";
+import ScanEquipmentReminder from "./components/ScanEquipmentReminder";
 import ScanTutorialModal from "./components/ScanTutorialModal";
 import { Button } from "./components/ui/button";
 import { Dialog, DialogContent } from "./components/ui/dialog";
@@ -181,6 +182,7 @@ export default function AppShell() {
   const navigate = useNavigate();
   const [tab, setTab] = useState<TabId>("library");
   const [onboardingOpen, setOnboardingOpen] = useState(false);
+  const [equipmentReminderOpen, setEquipmentReminderOpen] = useState(false);
   const [tutorialOpen, setTutorialOpen] = useState(false);
   const [scannerOpen, setScannerOpen] = useState(false);
 
@@ -189,7 +191,7 @@ export default function AppShell() {
     const st = location.state as { autoStartScan?: boolean } | null | undefined;
     if (st?.autoStartScan) {
       if (isOnboardingV2Complete()) {
-        setTutorialOpen(true);
+        setEquipmentReminderOpen(true);
       } else {
         setOnboardingOpen(true);
       }
@@ -199,10 +201,16 @@ export default function AppShell() {
 
   const openScannerFlow = () => {
     if (isOnboardingV2Complete()) {
-      setTutorialOpen(true);
+      /* Profilo già salvato: mostra comunque il promemoria foglio/telefono (anche su PC) prima del briefing */
+      setEquipmentReminderOpen(true);
       return;
     }
     setOnboardingOpen(true);
+  };
+
+  const finishEquipmentReminderAndOpenTutorial = () => {
+    setEquipmentReminderOpen(false);
+    setTutorialOpen(true);
   };
 
   const finishOnboardingAndOpenTutorial = () => {
@@ -228,6 +236,12 @@ export default function AppShell() {
         open={onboardingOpen}
         onOpenChange={setOnboardingOpen}
         onComplete={finishOnboardingAndOpenTutorial}
+      />
+
+      <ScanEquipmentReminder
+        open={equipmentReminderOpen}
+        onOpenChange={setEquipmentReminderOpen}
+        onContinue={finishEquipmentReminderAndOpenTutorial}
       />
 
       <ScanTutorialModal open={tutorialOpen} onDismiss={finishTutorialAndStartScan} />

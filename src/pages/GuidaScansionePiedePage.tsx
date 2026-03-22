@@ -5,6 +5,7 @@ import { Link } from "react-router-dom";
 import { ArrowLeft, Check, Footprints, Printer, Smartphone, Users, XCircle } from "lucide-react";
 import NeumaLogo from "../components/NeumaLogo";
 import FootPlacementGuideVisual from "../components/FootPlacementGuideVisual";
+import ScanTutorialSceneVisual from "../components/ScanTutorialSceneVisual";
 import { Button } from "../components/ui/button";
 import { Card, CardContent } from "../components/ui/card";
 import { cn } from "../lib/utils";
@@ -113,6 +114,8 @@ export default function GuidaScansionePiedePage() {
           </p>
         </header>
 
+        <ScanTutorialSceneVisual className="mb-6" />
+        <p className="mb-2 text-center text-xs font-semibold text-zinc-700">Dettaglio foglio (vista dall&apos;alto)</p>
         <FootPlacementGuideVisual className="mb-8" />
 
         <Card className="mb-8 border border-blue-200 bg-blue-50/60 shadow-sm">

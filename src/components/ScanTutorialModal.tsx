@@ -6,6 +6,7 @@ import { Button } from "./ui/button";
 import { Card, CardContent, CardFooter, CardHeader } from "./ui/card";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "./ui/dialog";
 import FootPlacementGuideVisual from "./FootPlacementGuideVisual";
+import ScanTutorialSceneVisual from "./ScanTutorialSceneVisual";
 
 type ScanTutorialModalProps = {
   open: boolean;
@@ -46,9 +47,18 @@ export default function ScanTutorialModal({ open, onDismiss }: ScanTutorialModal
           </DialogDescription>
         </DialogHeader>
 
+        <div className="rounded-xl border border-blue-200 bg-blue-50 px-3 py-2.5 text-left text-xs leading-snug text-blue-950 sm:text-sm">
+          <strong className="font-semibold">Materiale:</strong> foglio NEUMA stampato (Guida stampa) · telefono con fotocamera
+          · superficie rigida. Su PC puoi leggere il briefing; per la scansione reale usa il telefono come da istruzioni.
+        </div>
+
         <Card className="border-0 shadow-none">
-          <CardHeader className="pb-2">
-            <FootPlacementGuideVisual showRoleCaptions={false} />
+          <CardHeader className="space-y-4 pb-2">
+            <ScanTutorialSceneVisual />
+            <div className="border-t border-dashed border-zinc-200 pt-4">
+              <p className="mb-2 text-center text-xs font-semibold text-zinc-700">Dettaglio foglio (vista dall&apos;alto)</p>
+              <FootPlacementGuideVisual showRoleCaptions={false} />
+            </div>
           </CardHeader>
           <CardContent className="space-y-3 p-0 pt-2">
             {STEPS.map((step, i) => (

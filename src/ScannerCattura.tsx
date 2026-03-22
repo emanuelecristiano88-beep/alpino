@@ -16,12 +16,7 @@ import ScannerPhaseGuidePanel from "./components/scanner/ScannerPhaseGuidePanel"
 import ArucoMarkerPins from "./components/scanner/ArucoMarkerPins";
 import ScannerShutterButton from "./components/scanner/ScannerShutterButton";
 import BiometryOverlayPreview from "./components/scanner/BiometryOverlayPreview";
-import {
-  computeNeumaBiometryFromImageData,
-  serializeBiometryForMac,
-  type NeumaBiometryResult,
-} from "./lib/biometry";
-import { mergeBiometryPayloadWithUserProfile } from "./lib/neumaUserProfileV2";
+import { computeNeumaBiometryFromImageData, type NeumaBiometryResult } from "./lib/biometry";
 import type { Mat3 } from "./lib/biometry/homography";
 import { Smartphone } from "lucide-react";
 
@@ -38,6 +33,8 @@ type FootId = "LEFT" | "RIGHT";
 const CAPTURE_EVERY_MS = 800;
 const PHOTOS_PER_PHASE = 8;
 const TOTAL_PHOTOS = PHOTOS_PER_PHASE * 4;
+/** Vercel: body funzione ~4.5MB — più batch evitano FUNCTION_INVOCATION_FAILED */
+const UPLOAD_BATCH_SIZE = 8;
 const MAX_OUTPUT_DIM = 1024; // downscale to reduce memory/traffic
 const JPEG_QUALITY = 0.82;
 const DEFAULT_METRICS: Metrics = { footLengthMm: 265, forefootWidthMm: 95 };
@@ -255,8 +252,6 @@ export default function ScannerCattura() {
   const [biometryResult, setBiometryResult] = useState<NeumaBiometryResult | null>(null);
   const [biometryBusy, setBiometryBusy] = useState(false);
   const [biometrySourceIndex, setBiometrySourceIndex] = useState(0);
-  const [officinaBusy, setOfficinaBusy] = useState(false);
-  const [officinaOk, setOfficinaOk] = useState(false);
   const [processingProgress, setProcessingProgress] = useState(0);
   const [processingScanId, setProcessingScanId] = useState<string | null>(null);
   const [processingReady, setProcessingReady] = useState(false);
@@ -276,7 +271,6 @@ export default function ScannerCattura() {
     if (!pairComplete) {
       setBiometryResult(null);
       setBiometryBusy(false);
-      setOfficinaOk(false);
       return;
     }
     let cancelled = false;
@@ -656,7 +650,6 @@ export default function ScannerCattura() {
     autoStartedPhaseRef.current = -1;
     setBiometryResult(null);
     setBiometryBusy(false);
-    setOfficinaOk(false);
     setAcceptTerms(false);
     setCameraState("idle");
   };
@@ -673,38 +666,90 @@ export default function ScannerCattura() {
     stopProcessing();
 
     try {
-      const form = new FormData();
-      photosLeft.forEach((p, idx) => {
-        form.append("photos", p.blob, `left_${String(idx).padStart(2, "0")}.jpg`);
-      });
-      photosRight.forEach((p, idx) => {
-        form.append("photos", p.blob, `right_${String(idx).padStart(2, "0")}.jpg`);
-      });
-      form.append("count", String(photosLeft.length + photosRight.length));
-      form.append("pair", "true");
-
       const uploadHeaders = new Headers();
       const secret = import.meta.env.VITE_UPLOAD_API_SECRET as string | undefined;
       if (secret) uploadHeaders.set("x-upload-secret", secret);
 
-      const res = await fetch("/api/process-scan", {
-        method: "POST",
-        body: form,
-        headers: uploadHeaders,
-      });
+      const items: { blob: Blob; name: string }[] = [
+        ...photosLeft.map((p, idx) => ({
+          blob: p.blob,
+          name: `left_${String(idx).padStart(2, "0")}.jpg`,
+        })),
+        ...photosRight.map((p, idx) => ({
+          blob: p.blob,
+          name: `right_${String(idx).padStart(2, "0")}.jpg`,
+        })),
+      ];
 
-      if (!res.ok) {
+      const sessionScanId =
+        scanId ||
+        (typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `scan_${Date.now()}`);
+      if (!scanId) setScanId(sessionScanId);
+
+      const batchCount = Math.max(1, Math.ceil(items.length / UPLOAD_BATCH_SIZE));
+      const useBatched = batchCount > 1 || items.length > UPLOAD_BATCH_SIZE;
+
+      let driveFolderIdFromServer: string | undefined;
+      let lastJson: Record<string, unknown> | null = null;
+
+      for (let b = 0; b < batchCount; b++) {
+        const slice = items.slice(b * UPLOAD_BATCH_SIZE, (b + 1) * UPLOAD_BATCH_SIZE);
+        const form = new FormData();
+        slice.forEach((item) => {
+          form.append("photos", item.blob, item.name);
+        });
+        form.append("count", String(items.length));
+        form.append("pair", "true");
+        form.append("scanId", sessionScanId);
+        if (useBatched) {
+          form.append("batchIndex", String(b));
+          form.append("batchTotal", String(batchCount));
+          if (driveFolderIdFromServer) {
+            form.append("driveFolderId", driveFolderIdFromServer);
+          }
+        }
+
+        const res = await fetch("/api/process-scan", {
+          method: "POST",
+          body: form,
+          headers: uploadHeaders,
+        });
+
         const text = await res.text().catch(() => "");
-        throw new Error(`POST fallito (${res.status}). ${text}`);
+        if (!res.ok) {
+          throw new Error(`POST fallito (${res.status}). ${text}`);
+        }
+
+        let data: Record<string, unknown>;
+        try {
+          data = JSON.parse(text) as Record<string, unknown>;
+        } catch {
+          throw new Error("Risposta API non valida (JSON)");
+        }
+        lastJson = data;
+
+        const st = data.status;
+        if (typeof data.driveFolderId === "string" && data.driveFolderId) {
+          driveFolderIdFromServer = data.driveFolderId;
+        }
+
+        if (st === "partial") {
+          continue;
+        }
+        if (st === "success") {
+          break;
+        }
+        throw new Error(typeof data.message === "string" ? data.message : "Risposta API non valida");
       }
 
-      const data = await res.json().catch(() => null);
-
+      const data = lastJson;
       if (!data || data.status !== "success") {
-        throw new Error(data?.message || "Risposta API non valida");
+        throw new Error(
+          typeof data?.message === "string" ? data.message : "Upload incompleto: nessuna risposta success finale."
+        );
       }
 
-      const serverScanId = data?.scanId ? String(data.scanId) : scanId || "OK";
+      const serverScanId = data?.scanId ? String(data.scanId) : sessionScanId || "OK";
       const serverPath = typeof data?.path === "string" ? data.path : "";
 
       // allinea i badge tecnici all'ID server
@@ -733,42 +778,6 @@ export default function ScannerCattura() {
       stopProcessing();
       setCameraState("review");
       setError(`ERRORE_UPLOAD // ${e?.message || String(e)}`);
-    }
-  };
-
-  const sendBiometryToOfficina = async () => {
-    if (!biometryResult?.calibration.ok) return;
-    setOfficinaBusy(true);
-    setOfficinaOk(false);
-    setError("");
-    try {
-      const raw = serializeBiometryForMac(biometryResult);
-      const sid = scanId || crypto.randomUUID();
-      if (!scanId) setScanId(sid);
-      const headers = new Headers({ "Content-Type": "application/json" });
-      const sec = import.meta.env.VITE_UPLOAD_API_SECRET as string | undefined;
-      if (sec) headers.set("x-upload-secret", sec);
-      const res = await fetch("/api/orders", {
-        method: "POST",
-        headers,
-        body: JSON.stringify({
-          scanId: sid,
-          biometryJson: raw,
-          biometryPayload: mergeBiometryPayloadWithUserProfile(biometryResult.exportPayload),
-          source: "scanner_biometry_v1",
-        }),
-      });
-      if (!res.ok) {
-        const t = await res.text().catch(() => "");
-        throw new Error(t || `HTTP ${res.status}`);
-      }
-      const data = await res.json().catch(() => null);
-      if (data && !data.ok) throw new Error(data.error || "Ordine non registrato");
-      setOfficinaOk(true);
-    } catch (e: unknown) {
-      setError(`OFFICINA // ${e instanceof Error ? e.message : String(e)}`);
-    } finally {
-      setOfficinaBusy(false);
     }
   };
 
@@ -1158,21 +1167,6 @@ export default function ScannerCattura() {
               >
                 INVIA PAIO IN PRODUZIONE
               </Button>
-
-              <Button
-                type="button"
-                variant="default"
-                onClick={() => void sendBiometryToOfficina()}
-                disabled={!biometryResult?.calibration.ok || officinaBusy}
-                className="h-auto w-full rounded-xl border border-sky-500/50 bg-sky-600 px-6 py-4 font-mono text-lg tracking-[0.14em] text-white shadow-lg shadow-sky-600/25 hover:bg-sky-500 disabled:opacity-40"
-              >
-                {officinaBusy ? "INVIO IN CORSO…" : "INVIA ALL'OFFICINA"}
-              </Button>
-              {officinaOk ? (
-                <p className="text-center font-mono text-[11px] text-emerald-400">
-                  Dati biometrici registrati per l&apos;officina.
-                </p>
-              ) : null}
 
               <Button
                 type="button"
