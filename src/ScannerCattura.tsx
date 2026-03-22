@@ -759,7 +759,7 @@ export default function ScannerCattura() {
                 {formatCounter(activePhotosCount, TOTAL_PHOTOS)}
               </div>
             ) : (
-              <div className={techBadgeClass}>ALPINO_OFFICINA // PHOTOGRAMMETRY</div>
+              <div className={techBadgeClass}>NEUMA // PHOTOGRAMMETRY</div>
             )}
           </div>
         </div>
@@ -777,7 +777,7 @@ export default function ScannerCattura() {
             >
               <div className={phaseCardClass}>
                 <div className="font-mono text-xs tracking-[0.18em] text-blue-500">
-                  ALPINO_OFFICINA // PHOTOGRAMMETRY
+                  NEUMA // PHOTOGRAMMETRY
                 </div>
                 <div className="mt-3 font-sans text-lg text-zinc-400">
                   Due piedi nello stesso ordine: prima <strong className="text-zinc-100">sinistro</strong>, poi{" "}
@@ -787,14 +787,14 @@ export default function ScannerCattura() {
                 <div className="mt-5 w-full max-w-md space-y-3 text-left">
                   <div className="flex items-start gap-3">
                     <Checkbox
-                      id="alpino-terms-biometric"
+                      id="neuma-terms-biometric"
                       checked={acceptTerms}
                       onCheckedChange={(v) => setAcceptTerms(v === true)}
                       className="mt-0.5 border-zinc-600 data-[state=checked]:border-blue-600 data-[state=checked]:bg-blue-600"
-                      aria-describedby="alpino-privacy-note alpino-transparency-box"
+                      aria-describedby="neuma-privacy-note neuma-transparency-box"
                     />
                     <Label
-                      htmlFor="alpino-terms-biometric"
+                      htmlFor="neuma-terms-biometric"
                       className="cursor-pointer text-sm font-normal leading-snug text-zinc-300 peer-disabled:cursor-not-allowed"
                     >
                       {
@@ -803,15 +803,15 @@ export default function ScannerCattura() {
                     </Label>
                   </div>
                   <p
-                    id="alpino-privacy-note"
+                    id="neuma-privacy-note"
                     className="pl-7 text-[11px] leading-relaxed text-zinc-500"
                   >
                     {
-                      "Le tue foto vengono utilizzate esclusivamente per generare il modello 3D del piede. I file originali verranno eliminati dopo la produzione della scarpa presso l'Officina Alpino."
+                      "Le tue foto vengono utilizzate esclusivamente per generare il modello 3D del piede. I file originali verranno eliminati dopo la produzione della scarpa presso NEUMA."
                     }
                   </p>
                   <div
-                    id="alpino-transparency-box"
+                    id="neuma-transparency-box"
                     className="rounded-lg border border-zinc-800 bg-zinc-900/80 px-3 py-2.5 text-[11px] leading-relaxed text-zinc-400 shadow-inner"
                   >
                     <span className="font-mono text-[10px] uppercase tracking-[0.12em] text-blue-500/90">

@@ -1,5 +1,5 @@
 /**
- * Metriche da mesh 3D (pipeline Mac / officina).
+ * Metriche da mesh 3D (pipeline Mac / NEUMA).
  * Convenzioni allineate a misurazioni ortopediche su plantare / last.
  */
 

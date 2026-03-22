@@ -28,7 +28,7 @@ export default async function handler(request: Request): Promise<Response> {
     const orderId = crypto.randomUUID();
 
     console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    console.log("[ALPINO_OFFICINA] Nuovo ordine in produzione (Vercel Edge)");
+    console.log("[NEUMA] Nuovo ordine in produzione (Vercel Edge)");
     console.log("  orderId:", orderId);
     console.log("  scanId:", body.scanId ?? "(mancante)");
     console.log("  tagliaScelta:", body.tagliaScelta ?? "(mancante)");
@@ -39,7 +39,7 @@ export default async function handler(request: Request): Promise<Response> {
     return Response.json({
       ok: true,
       orderId,
-      message: "Ordine registrato. Officina Alpino notificata (simulazione log).",
+      message: "Ordine registrato. NEUMA notificata (simulazione log).",
     });
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);

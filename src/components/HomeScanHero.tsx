@@ -54,7 +54,7 @@ export default function HomeScanHero({ onOpenScanner }: HomeScanHeroProps) {
             >
               Scansiona ora
             </Button>
-            <span className="text-center text-[11px] text-zinc-600 sm:text-right">TPU · stampa additiva · Alpino</span>
+            <span className="text-center text-[11px] text-zinc-600 sm:text-right">TPU · stampa additiva · NEUMA</span>
             <a
               href="#benefici-piede"
               className="inline-flex items-center justify-center gap-1 text-center text-sm font-medium text-blue-600 underline-offset-4 hover:text-blue-700 hover:underline sm:text-right"

@@ -17,10 +17,10 @@ export default function TecnologiaTpuPage() {
         </Button>
 
         <header className="space-y-2">
-          <p className="text-xs font-medium uppercase tracking-wider text-primary">Officina Alpino</p>
+          <p className="text-xs font-medium uppercase tracking-wider text-primary">NEUMA</p>
           <h1 className="text-3xl font-bold tracking-tight md:text-4xl">Tecnologia TPU &amp; stampanti 3D</h1>
           <p className="text-base text-muted-foreground leading-relaxed">
-            Le tue scarpe nascono dalla nostra <strong className="text-foreground">produzione in officina</strong>: precisione
+            Le tue scarpe nascono dalla nostra <strong className="text-foreground">produzione NEUMA</strong>: precisione
             industriale, materiali premium e un processo pensato per il piede — non per il magazzino.
           </p>
         </header>
@@ -87,7 +87,7 @@ export default function TecnologiaTpuPage() {
               </p>
               <p>
                 Ogni interstizio lavora in sincrono con gli altri: il piede riceve sostegno dove serve e libertà di
-                movimento dove conta — con la ripetibilità della produzione in officina.
+                movimento dove conta — con la ripetibilità della produzione NEUMA.
               </p>
             </div>
           </CardContent>
@@ -134,7 +134,7 @@ export default function TecnologiaTpuPage() {
                 <p className="mt-1 text-sm text-muted-foreground leading-relaxed">
                   Produciamo <strong className="text-foreground">solo ciò che serve</strong> — approccio{" "}
                   <strong className="text-foreground">Zero Waste</strong>, direttamente in{" "}
-                  <strong className="text-foreground">Officina Alpino</strong>, senza catene di montaggio né{" "}
+                  <strong className="text-foreground">NEUMA</strong>, senza catene di montaggio né{" "}
                   <strong className="text-foreground">trasporti transoceanici</strong> per riempire scaffali.
                 </p>
               </div>

@@ -5,7 +5,7 @@ Richiede **macOS 12+** e **Xcode / Command Line Tools** con SDK RealityKit.
 ## Compilazione
 
 ```bash
-cd /Users/emanuelecristiano/Desktop/AlpinoApp/scripts
+cd /path/to/neuma-app/scripts
 swiftc -parse-as-library -O -framework RealityKit process_foot.swift -o process_foot
 ```
 

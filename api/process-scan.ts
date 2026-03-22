@@ -120,7 +120,7 @@ export default async function handler(request: Request): Promise<Response> {
       scaleFactorApplied: 1.0,
       scaleReferenceNote: "A4 detected (placeholder) — Vercel Edge: nessun salvataggio file su disco",
       scaleReference,
-      message: "Pronto per la ricostruzione 3D in officina",
+      message: "Pronto per la ricostruzione 3D (NEUMA)",
       metrics,
     });
   } catch (e: unknown) {

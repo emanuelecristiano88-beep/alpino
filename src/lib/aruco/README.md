@@ -1,4 +1,4 @@
-# Rilevamento ArUco (Alpino scanner)
+# Rilevamento ArUco (scanner NEUMA)
 
 ## Implementazione attuale
 

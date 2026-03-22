@@ -87,7 +87,7 @@ export function downloadGuidaStampaPdf() {
   doc.setFont("helvetica", "bold");
   doc.setFontSize(13);
   doc.setTextColor(25, 25, 25);
-  doc.text("ALPINO — Guida stampa · Target A4", W / 2, 14, { align: "center" });
+  doc.text("NEUMA — Guida stampa · Target A4", W / 2, 14, { align: "center" });
 
   doc.setFont("helvetica", "normal");
   doc.setFontSize(8);
@@ -137,5 +137,5 @@ export function downloadGuidaStampaPdf() {
   );
   doc.text(foot, W / 2, 291, { align: "center" });
 
-  doc.save("alpino-guida-stampa-a4.pdf");
+  doc.save("neuma-guida-stampa-a4.pdf");
 }

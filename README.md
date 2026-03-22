@@ -1,4 +1,4 @@
-# Alpino App
+# NEUMA
 
 Stack UI: **React + Vite**, **Tailwind CSS**, **shadcn/ui** (stile **New York**, base colore **Zinc**), **Radix UI**. Tema **dark** di default (`<html class="dark">`), raggio **0.75rem** (`--radius`), font **Inter** (sans) / **JetBrains Mono** (mono) da Google Fonts.
 
@@ -18,7 +18,7 @@ Se **`localhost:5173` è tutto bianco** ma **`localhost:5174`** va bene, quasi s
 ```bash
 # macOS: termina il processo sulla porta 5173
 lsof -ti:5173 | xargs kill -9
-cd /Users/emanuelecristiano/Desktop/AlpinoApp && npm run dev
+cd /path/to/neuma-app && npm run dev
 ```
 
 Poi apri di nuovo **`http://localhost:5173`**.

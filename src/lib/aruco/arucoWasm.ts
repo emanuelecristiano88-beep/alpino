@@ -5,7 +5,7 @@
 
 import type { ArucoMarkerDetection } from "./a4MarkerGeometry";
 
-/** Allinea al PDF Alpino: se usi un altro dizionario OpenCV, cambia qui (es. "ARUCO_MIP_36H12"). */
+/** Allinea al PDF guida stampa NEUMA: se usi un altro dizionario OpenCV, cambia qui (es. "ARUCO_MIP_36H12"). */
 export const ARUCO_DICTIONARY_NAME = "ARUCO";
 
 const MAX_HAMMING = 2;

@@ -191,7 +191,7 @@ export function ScannerTarget() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = "alpino-scanner-target-a4.svg";
+    a.download = "neuma-scanner-target-a4.svg";
     a.click();
     URL.revokeObjectURL(url);
   }, []);
@@ -237,7 +237,7 @@ export function ScannerTarget() {
           className="mx-auto block h-auto max-w-full"
           style={{ width: "min(100%, 210mm)", aspectRatio: `${W_MM} / ${H_MM}` }}
         >
-          <title id={SVG_TITLE_ID}>Foglio calibrazione A4 Officina Alpino</title>
+          <title id={SVG_TITLE_ID}>Foglio calibrazione A4 NEUMA</title>
           <desc id={SVG_DESC_ID}>
             Griglia millimetrata, marker ArUco agli angoli e area piede centrale per scansione precisa.
           </desc>

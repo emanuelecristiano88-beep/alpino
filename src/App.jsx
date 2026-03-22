@@ -529,7 +529,7 @@ export default function App() {
             <div className="record-scan-sweep" />
 
             <div className="absolute top-3 w-full text-center font-mono text-[11px] tracking-[0.18em] text-lime-300/90">
-              ALPINO_SCAN // ALLINEA IL PIEDE
+              NEUMA_SCAN // ALLINEA IL PIEDE
             </div>
 
             {/* Frecce visibili sempre */}

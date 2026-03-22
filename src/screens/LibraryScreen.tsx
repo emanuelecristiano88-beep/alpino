@@ -380,7 +380,7 @@ export default function LibraryScreen({ onOpenScanner }: LibraryScreenProps) {
                     type="button"
                     className="absolute bottom-4 right-4 z-20 rounded-full bg-blue-600 px-8 py-6 text-sm font-semibold text-white shadow-lg shadow-blue-600/35 hover:bg-blue-700 md:bottom-6 md:right-5"
                     onClick={() => {
-                      document.getElementById("alpino-production-panel")?.scrollIntoView({ behavior: "smooth", block: "start" });
+                      document.getElementById("neuma-production-panel")?.scrollIntoView({ behavior: "smooth", block: "start" });
                     }}
                   >
                     Conferma
@@ -390,7 +390,7 @@ export default function LibraryScreen({ onOpenScanner }: LibraryScreenProps) {
             ) : null}
 
             <div
-              id="alpino-production-panel"
+              id="neuma-production-panel"
               className="border-t border-zinc-800 bg-zinc-950/95 px-4 pb-[max(1rem,env(safe-area-inset-bottom))] pt-4 backdrop-blur-md"
             >
               <div className="mx-auto max-w-md space-y-4">
@@ -462,7 +462,7 @@ export default function LibraryScreen({ onOpenScanner }: LibraryScreenProps) {
                 {!pairReadyForProduction && !orderSent ? (
                   <p className="text-center text-xs text-amber-200/90">
                     Completa la scansione del paio (piede sinistro + destro) e invia le foto dallo scanner per abilitare
-                    l&apos;invio in officina.
+                    l&apos;invio a NEUMA.
                   </p>
                 ) : null}
 
@@ -474,7 +474,7 @@ export default function LibraryScreen({ onOpenScanner }: LibraryScreenProps) {
                   disabled={orderSending || orderSent || !pairReadyForProduction}
                 >
                   {orderSent
-                    ? "INVIATO A OFFICINA ALPINO"
+                    ? "INVIATO A NEUMA"
                     : orderSending
                       ? "Invio in corso…"
                       : "INVIA PAIO IN PRODUZIONE"}

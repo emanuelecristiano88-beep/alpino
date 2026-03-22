@@ -10,8 +10,8 @@ export type ThemeConfig = {
   radiusScale: number;
 };
 
-/** v3: reset cache locale per eliminare accenti lime salvati in passato */
-export const THEME_STORAGE_KEY = "alpino-theme-v3";
+/** Chiave localStorage tema NEUMA (reset se migri da vecchio brand). */
+export const THEME_STORAGE_KEY = "neuma-theme-v1";
 
 export const DEFAULT_THEME: ThemeConfig = {
   /** Blu principale (Tailwind blue-600) — bottoni, checkbox, focus ring */

@@ -26,7 +26,7 @@ export async function POST(req: Request) {
 
     // Notifica / log operativo (sostituire con invio reale)
     console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    console.log("[ALPINO_OFFICINA] Nuovo ordine in produzione");
+    console.log("[NEUMA] Nuovo ordine in produzione");
     console.log("  orderId:", orderId);
     console.log("  scanId:", body.scanId ?? "(mancante)");
     console.log("  tagliaScelta:", body.tagliaScelta ?? "(mancante)");
@@ -37,7 +37,7 @@ export async function POST(req: Request) {
     return Response.json({
       ok: true,
       orderId,
-      message: "Ordine registrato. Officina Alpino notificata (simulazione log).",
+      message: "Ordine registrato. NEUMA notificata (simulazione log).",
     });
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);

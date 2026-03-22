@@ -9,7 +9,7 @@ import ScanTutorialModal from "./components/ScanTutorialModal";
 import { Button } from "./components/ui/button";
 import { Dialog, DialogContent } from "./components/ui/dialog";
 import { cn } from "./lib/utils";
-import { ALPINO_UI_BUILD_ID } from "./config/build";
+import { NEUMA_UI_BUILD_ID } from "./config/build";
 
 type TabId = "library" | "albums" | "explore" | "menu";
 
@@ -69,7 +69,7 @@ function MenuScreen({ onOpenScanner }: { onOpenScanner: () => void }) {
           <span className="text-xs text-blue-600">(build Shadcn + Tailwind)</span>
         </p>
         <p className="mt-2 font-mono text-[10px] text-zinc-500">
-          Build: {ALPINO_UI_BUILD_ID} — se non vedi questa riga, Vercel non sta servendo questo repository.
+          Build: {NEUMA_UI_BUILD_ID} — se non vedi questa riga, Vercel non sta servendo questo repository.
         </p>
         <Button
           type="button"

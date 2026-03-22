@@ -132,7 +132,7 @@ export async function POST(req: Request) {
       /** Segnale per client/officina: in futuro "A4+markers detected" quando il backend lo espone */
       scaleReferenceNote: "A4 detected (placeholder)",
       scaleReference,
-      message: "Pronto per la ricostruzione 3D in officina",
+      message: "Pronto per la ricostruzione 3D (NEUMA)",
     });
   } catch (e: any) {
     return Response.json(
