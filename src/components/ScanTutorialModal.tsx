@@ -1,10 +1,12 @@
 "use client";
 
 import React from "react";
+import { Link } from "react-router-dom";
 import { CheckCircle2 } from "lucide-react";
 import { Button } from "./ui/button";
 import { Card, CardContent, CardFooter, CardHeader } from "./ui/card";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "./ui/dialog";
+import { SCAN_PHASE_TUTORIAL_BLURB } from "../constants/scanCapturePhases";
 import FootPlacementGuideVisual from "./FootPlacementGuideVisual";
 import ScanTutorialSceneVisual from "./ScanTutorialSceneVisual";
 
@@ -15,24 +17,28 @@ type ScanTutorialModalProps = {
 
 const STEPS = [
   {
-    title: "Due persone",
-    text: "Il cliente tiene il piede fermo; un operatore fa le foto con il telefono (non serve che il cliente si muova).",
+    title: "Preparazione",
+    text: "Due persone; foglio NEUMA stampato al 100%; piede nell’area; tutti e 4 i marker ArUco sempre in inquadratura.",
   },
   {
-    title: "Foglio A4 NEUMA stampato",
-    text: "Usa il foglio con griglia in cm e marker agli angoli (Guida stampa). Stampa al 100%, senza ridimensionare.",
+    title: "1 · Vista dall’alto",
+    text: SCAN_PHASE_TUTORIAL_BLURB[0],
   },
   {
-    title: "Piede al centro del foglio",
-    text: "Allinea il tallone all’area centro foglio (croce sul foglio stampato). Piede nudo, pavimento piatto, buona luce.",
+    title: "2 · Vista laterale esterna",
+    text: SCAN_PHASE_TUTORIAL_BLURB[1],
   },
   {
-    title: "Operatore: orbita lenta",
-    text: "Inquadra sempre foglio e piede per intero. Muoviti lentamente attorno al piede; il cliente non sposta il piede.",
+    title: "3 · Vista laterale interna e arco",
+    text: SCAN_PHASE_TUTORIAL_BLURB[2],
+  },
+  {
+    title: "4 · Vista posteriore e tallone",
+    text: SCAN_PHASE_TUTORIAL_BLURB[3],
   },
   {
     title: "Invio",
-    text: "Completa sinistro e destro se richiesto e attendi la fine dell’upload.",
+    text: "Completa le 4 fasi per piede; ripeti per l’altro piede se richiesto e attendi la fine dell’upload.",
   },
 ];
 
@@ -55,8 +61,10 @@ export default function ScanTutorialModal({ open, onDismiss }: ScanTutorialModal
         <Card className="border-0 shadow-none">
           <CardHeader className="space-y-4 pb-2">
             <ScanTutorialSceneVisual />
-            <div className="border-t border-dashed border-zinc-200 pt-4">
-              <p className="mb-2 text-center text-xs font-semibold text-zinc-700">Dettaglio foglio (vista dall&apos;alto)</p>
+            <div className="border-t border-dashed border-zinc-200 pt-4 dark:border-zinc-700">
+              <p className="mb-2 text-center text-xs font-semibold text-zinc-700 dark:text-zinc-300">
+                Foglio NEUMA (target A4 · marker ArUco)
+              </p>
               <FootPlacementGuideVisual showRoleCaptions={false} />
             </div>
           </CardHeader>
@@ -71,7 +79,15 @@ export default function ScanTutorialModal({ open, onDismiss }: ScanTutorialModal
               </div>
             ))}
           </CardContent>
-          <CardFooter className="mt-6 justify-end p-0">
+          <CardFooter className="mt-6 flex-col gap-3 p-0">
+            <p className="text-center text-xs text-muted-foreground">
+              <Link
+                to="/guida-scansione"
+                className="font-medium text-primary underline-offset-4 hover:underline"
+              >
+                Illustrazioni delle 4 fasi (guida completa)
+              </Link>
+            </p>
             <Button type="button" onClick={onDismiss} className="w-full sm:w-auto">
               Inizia scansione
             </Button>

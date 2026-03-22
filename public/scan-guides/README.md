@@ -1,10 +1,5 @@
-# Guide fasi scanner (opzionale)
+# Guide fasi scanner
 
-Se presenti, queste immagini sostituiscono lo schema SVG nel pannello **prima di ogni fase**:
+Le **4 illustrazioni** delle fasi sono generate in codice (`ScanPhaseGuideIllustration.tsx`): stile NEUMA con cornice telefono, overlay blu, mirino e foglio con marker.
 
-- `phase-0.png` — Frontale / tallone  
-- `phase-1.png` — Lato interno  
-- `phase-2.png` — Lato esterno  
-- `phase-3.png` — Punta / vista superiore  
-
-Formato consigliato: PNG o JPG, proporzione ~16:10, sfondo scuro coerente con l’app.
+Non sono più usate immagini PNG opzionali in questa cartella; puoi comunque aggiungere asset qui per usi futuri (documentazione, marketing).

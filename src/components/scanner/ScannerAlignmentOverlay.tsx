@@ -33,15 +33,16 @@ export default function ScannerAlignmentOverlay({
 
   const tilt = frameTilt ?? { rotateX: 0, rotateY: 0, rotateZ: 0 };
 
+  /** Fase 0 = dall’alto (cornice larga); 1–2 = laterali; 3 = posteriore/tallone (cornice più alta) */
   const bboxShapeClass = useMemo(() => {
     switch (phaseIndex) {
       case 0:
-        return "h-[58dvh] w-[52vw] max-h-[min(78dvh,680px)] max-w-[min(88vw,420px)]";
+        return "h-[50dvh] w-[64vw] max-h-[min(72dvh,600px)] max-w-[min(92vw,560px)]";
       case 1:
       case 2:
         return "h-[56dvh] w-[58vw] max-h-[min(76dvh,660px)] max-w-[min(90vw,480px)]";
       case 3:
-        return "h-[50dvh] w-[64vw] max-h-[min(72dvh,600px)] max-w-[min(92vw,560px)]";
+        return "h-[58dvh] w-[52vw] max-h-[min(78dvh,680px)] max-w-[min(88vw,420px)]";
       default:
         return "h-[60dvh] w-[60vw] max-h-[min(80dvh,720px)] max-w-[min(92vw,520px)]";
     }

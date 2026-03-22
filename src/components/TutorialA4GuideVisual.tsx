@@ -1,10 +1,10 @@
 "use client";
 
 import React from "react";
+import { NEUMA_A4_TARGET_PREVIEW } from "../lib/neumaAssets";
 
 /**
- * Guida visiva: foglio A4 (rettangolo bianco), piede sopra, orbita della camera.
- * Opzionale: aggiungi `public/tutorial-a4-guide.png` — se presente, viene mostrato al posto dello SVG.
+ * Guida visiva: anteprima foglio NEUMA (target A4 + ArUco); fallback SVG se l’asset manca.
  */
 export default function TutorialA4GuideVisual() {
   const [useRaster, setUseRaster] = React.useState(true);
@@ -13,8 +13,8 @@ export default function TutorialA4GuideVisual() {
     <div className="relative aspect-[4/3] w-full overflow-hidden rounded-lg bg-zinc-900/40">
       {useRaster ? (
         <img
-          src="/tutorial-a4-guide.png"
-          alt="Piede sul foglio A4: muovi il telefono in orbita tenendo visibili i bordi del foglio"
+          src={NEUMA_A4_TARGET_PREVIEW}
+          alt="Foglio NEUMA: muovi il telefono in orbita tenendo visibili foglio e marker agli angoli"
           className="h-full w-full object-contain"
           onError={() => setUseRaster(false)}
         />

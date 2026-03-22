@@ -5,6 +5,7 @@ import { Link } from "react-router-dom";
 import { ArrowLeft, Check, Footprints, Printer, Smartphone, Users, XCircle } from "lucide-react";
 import NeumaLogo from "../components/NeumaLogo";
 import FootPlacementGuideVisual from "../components/FootPlacementGuideVisual";
+import ScanPhaseReferenceGrid from "../components/ScanPhaseReferenceGrid";
 import ScanTutorialSceneVisual from "../components/ScanTutorialSceneVisual";
 import { Button } from "../components/ui/button";
 import { Card, CardContent } from "../components/ui/card";
@@ -55,19 +56,28 @@ const STEPS = [
   },
   {
     n: 4,
-    title: "Operatore: inquadra e orbita",
+    title: "Le 4 inquadrature (nell’ordine dell’app)",
     Icon: Smartphone,
     lines: [
       <>
-        Tieni il telefono <strong className="text-zinc-800">stabile</strong>: devono essere sempre visibili{" "}
-        <strong className="text-zinc-800">tutto il foglio</strong> e il <strong className="text-zinc-800">piede</strong>.
+        <strong className="text-zinc-800">1 · Vista dall’alto</strong> — telefono sopra il piede: punta, avampiede e
+        contorni; foglio e 4 marker nel frame.
       </>,
       <>
-        Muoviti <strong className="text-zinc-800">lentamente</strong> attorno al piede (orbita), seguendo le istruzioni
-        nell’app.
+        <strong className="text-zinc-800">2 · Vista laterale esterna</strong> — dal lato del mignolo, profilo lento e
+        distanza costante.
       </>,
       <>
-        Il <strong className="text-zinc-800">cliente non sposta</strong> il piede finché la sessione non è finita.
+        <strong className="text-zinc-800">3 · Vista laterale interna e arco</strong> — dal lato interno, arco lento lungo
+        l’arco plantare.
+      </>,
+      <>
+        <strong className="text-zinc-800">4 · Vista posteriore e tallone</strong> — dietro al tallone; retro piede e
+        calcagno, poi leggera inclinazione verso la pianta se serve.
+      </>,
+      <>
+        Il <strong className="text-zinc-800">cliente non sposta</strong> il piede tra una fase e l’altra; movimenti solo
+        dell’operatore.
       </>,
     ],
   },
@@ -115,8 +125,10 @@ export default function GuidaScansionePiedePage() {
         </header>
 
         <ScanTutorialSceneVisual className="mb-6" />
-        <p className="mb-2 text-center text-xs font-semibold text-zinc-700">Dettaglio foglio (vista dall&apos;alto)</p>
+        <p className="mb-2 text-center text-xs font-semibold text-zinc-700">Foglio NEUMA (target A4 · marker ArUco)</p>
         <FootPlacementGuideVisual className="mb-8" />
+
+        <ScanPhaseReferenceGrid className="mb-8" />
 
         <Card className="mb-8 border border-blue-200 bg-blue-50/60 shadow-sm">
           <CardContent className="space-y-2 p-4 text-sm text-zinc-700">

@@ -1,116 +1,13 @@
 "use client";
 
-import React, { useState } from "react";
+import React from "react";
 import { Button } from "../ui/button";
 import { cn } from "../../lib/utils";
+import { SCAN_PHASE_GUIDE_COPY, SCAN_PHASE_REFERENCE_PHOTO, type ScanPhaseId } from "../../constants/scanCapturePhases";
+import ScanPhaseGuideIllustration from "./ScanPhaseGuideIllustration";
 
-export type PhaseId = 0 | 1 | 2 | 3;
+export type PhaseId = ScanPhaseId;
 type FootId = "LEFT" | "RIGHT";
-
-const PHASE_COPY: Record<
-  PhaseId,
-  { title: string; client: string; operator: string; hint: string }
-> = {
-  0: {
-    title: "Frontale / tallone",
-    client:
-      "Piede nudo fermo sul foglio NEUMA, tallone nell’area indicata. Non spostare il piede durante la fase.",
-    operator:
-      "Posizionati dietro o di lato al tallone. Inclina il telefono verso la pianta mantenendo tutto il foglio e i 4 marker inquadrati.",
-    hint: "Inquadra il tallone e inclina verso la pianta.",
-  },
-  1: {
-    title: "Lato interno",
-    client: "Resta fermo: il piede non deve ruotare sul foglio.",
-    operator:
-      "Sposta lentamente il telefono lungo il lato interno (arco plantare), a distanza costante (~15–20 cm). Evita ombre nette sul piede.",
-    hint: "Muovi il telefono lentamente verso l’interno del piede.",
-  },
-  2: {
-    title: "Lato esterno",
-    client: "Stessa posizione del piede, nessun movimento.",
-    operator:
-      "Ripeti il movimento lento sul lato esterno del piede, parallelo al foglio. Mantieni il frame stabile tra uno scatto e l’altro.",
-    hint: "Muovi il telefono verso l’esterno, mantieni la distanza.",
-  },
-  3: {
-    title: "Punta / vista superiore",
-    client: "Le dita restano naturali, senza sollevarle dal foglio.",
-    operator:
-      "Porta il telefono sopra le dita e il collo del piede: vista quasi dall’alto. Copri punta e avampiede nello stesso piano focale.",
-    hint: "Inquadra le dita e la parte dorsale dall’alto.",
-  },
-};
-
-/** Illustrazioni SVG schematiche (sostituibili con immagini in public/scan-guides/) */
-function PhaseIllustration({ phaseId }: { phaseId: PhaseId }) {
-  if (phaseId === 0) {
-    return (
-      <svg viewBox="0 0 320 200" className="h-auto w-full max-h-[200px]" fill="none" aria-hidden>
-        <rect x="20" y="10" width="280" height="180" rx="6" fill="#18181b" stroke="#2563eb" strokeWidth="2" opacity={0.9} />
-        <rect x="100" y="50" width="120" height="90" rx="8" fill="#3f3f46" stroke="#a1a1aa" />
-        <ellipse cx="160" cy="95" rx="28" ry="38" fill="#d4d4d8" />
-        <g transform="translate(248 120) rotate(-25)">
-          <rect x="-12" y="-28" width="24" height="56" rx="4" fill="#27272a" stroke="#2563eb" strokeWidth="1.5" />
-          <rect x="-9" y="-20" width="18" height="32" rx="2" fill="#0ea5e9" opacity={0.3} />
-        </g>
-        <path d="M 200 85 L 235 70" stroke="#2563eb" strokeWidth="2" strokeDasharray="4 3" markerEnd="url(#arr)" />
-        <defs>
-          <marker id="arr" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto">
-            <polygon points="0 0, 6 3, 0 6" fill="#2563eb" />
-          </marker>
-        </defs>
-        <text x="160" y="188" textAnchor="middle" fill="#a1a1aa" fontSize="10" fontFamily="system-ui">
-          Vista schema: tallone + telefono inclinato verso la pianta
-        </text>
-      </svg>
-    );
-  }
-  if (phaseId === 1) {
-    return (
-      <svg viewBox="0 0 320 200" className="h-auto w-full max-h-[200px]" fill="none" aria-hidden>
-        <rect x="20" y="10" width="280" height="180" rx="6" fill="#18181b" stroke="#2563eb" strokeWidth="2" />
-        <ellipse cx="160" cy="95" rx="32" ry="42" fill="#d4d4d8" stroke="#71717a" />
-        <path d="M 130 95 Q 160 75 190 95" stroke="#71717a" fill="none" />
-        <g transform="translate(95 95) rotate(15)">
-          <rect x="-12" y="-28" width="24" height="56" rx="4" fill="#27272a" stroke="#2563eb" strokeWidth="1.5" />
-        </g>
-        <path d="M 200 85 L 250 95" stroke="#2563eb" strokeWidth="2" strokeDasharray="5 4" opacity={0.8} />
-        <text x="160" y="188" textAnchor="middle" fill="#a1a1aa" fontSize="10" fontFamily="system-ui">
-          Telefono lungo il lato interno del piede
-        </text>
-      </svg>
-    );
-  }
-  if (phaseId === 2) {
-    return (
-      <svg viewBox="0 0 320 200" className="h-auto w-full max-h-[200px]" fill="none" aria-hidden>
-        <rect x="20" y="10" width="280" height="180" rx="6" fill="#18181b" stroke="#2563eb" strokeWidth="2" />
-        <ellipse cx="160" cy="95" rx="32" ry="42" fill="#d4d4d8" stroke="#71717a" />
-        <g transform="translate(225 95) rotate(-15)">
-          <rect x="-12" y="-28" width="24" height="56" rx="4" fill="#27272a" stroke="#2563eb" strokeWidth="1.5" />
-        </g>
-        <path d="M 120 95 L 70 95" stroke="#2563eb" strokeWidth="2" strokeDasharray="5 4" opacity={0.8} />
-        <text x="160" y="188" textAnchor="middle" fill="#a1a1aa" fontSize="10" fontFamily="system-ui">
-          Telefono lungo il lato esterno
-        </text>
-      </svg>
-    );
-  }
-  return (
-    <svg viewBox="0 0 320 200" className="h-auto w-full max-h-[200px]" fill="none" aria-hidden>
-      <rect x="20" y="10" width="280" height="180" rx="6" fill="#18181b" stroke="#2563eb" strokeWidth="2" />
-      <ellipse cx="160" cy="100" rx="30" ry="40" fill="#d4d4d8" stroke="#71717a" />
-      <g transform="translate(160 45) rotate(0)">
-        <rect x="-18" y="-22" width="36" height="44" rx="4" fill="#27272a" stroke="#2563eb" strokeWidth="1.5" />
-          <rect x="-14" y="-16" width="28" height="34" rx="2" fill="#0ea5e9" opacity={0.25} />
-      </g>
-      <text x="160" y="188" textAnchor="middle" fill="#a1a1aa" fontSize="10" fontFamily="system-ui">
-        Vista dall’alto: punta e collo del piede
-      </text>
-    </svg>
-  );
-}
 
 export type ScannerPhaseGuidePanelProps = {
   phaseId: PhaseId;
@@ -119,13 +16,11 @@ export type ScannerPhaseGuidePanelProps = {
 };
 
 /**
- * Schermata prima di ogni fase: posizione cliente + operatore.
- * Opzionale: `public/scan-guides/phase-0.png` … `phase-3.png` sostituiscono lo SVG se presenti.
+ * Schermata prima di ogni fase: illustrazione vettoriale stile NEUMA + testi cliente/operatore.
  */
 export default function ScannerPhaseGuidePanel({ phaseId, foot, onContinue }: ScannerPhaseGuidePanelProps) {
-  const [rasterFailed, setRasterFailed] = useState(false);
-  const imgSrc = `/scan-guides/phase-${phaseId}.png`;
-  const copy = PHASE_COPY[phaseId];
+  const copy = SCAN_PHASE_GUIDE_COPY[phaseId];
+  const ref = SCAN_PHASE_REFERENCE_PHOTO[phaseId];
 
   return (
     <div className="fixed inset-0 z-[96] flex flex-col bg-zinc-950/97">
@@ -137,20 +32,20 @@ export default function ScannerPhaseGuidePanel({ phaseId, foot, onContinue }: Sc
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
-        <div className="mx-auto max-w-md overflow-hidden rounded-xl border border-white/10 bg-zinc-900/80">
-          {!rasterFailed ? (
-            <img
-              src={imgSrc}
-              alt=""
-              className="h-auto w-full object-contain"
-              onError={() => setRasterFailed(true)}
-            />
-          ) : (
-            <div className="p-3">
-              <PhaseIllustration phaseId={phaseId} />
-            </div>
-          )}
-        </div>
+        <figure className="mx-auto max-w-md overflow-hidden rounded-xl border border-white/10 bg-zinc-900/80 shadow-lg shadow-black/40">
+          <div className="relative bg-[#0a0a0f]">
+            <span className="absolute left-2 top-2 z-[1] rounded-md bg-black/65 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-white backdrop-blur-sm">
+              Schema inquadratura
+            </span>
+            <p className="sr-only">{ref.alt}</p>
+            <ScanPhaseGuideIllustration phaseId={phaseId} variant="panel" className="block" />
+          </div>
+          <figcaption className="border-t border-white/10 bg-zinc-900/90 px-3 py-2.5 text-left text-[12px] leading-snug text-zinc-300">
+            <span className="font-medium text-white">{copy.title}</span>
+            <span className="mx-1.5 text-zinc-600">·</span>
+            {ref.caption}
+          </figcaption>
+        </figure>
 
         <div className="mx-auto mt-4 max-w-md space-y-3 text-left text-sm leading-relaxed text-zinc-300">
           <div>

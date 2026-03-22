@@ -19,6 +19,7 @@ import BiometryOverlayPreview from "./components/scanner/BiometryOverlayPreview"
 import { computeNeumaBiometryFromImageData, type NeumaBiometryResult } from "./lib/biometry";
 import type { Mat3 } from "./lib/biometry/homography";
 import { Smartphone } from "lucide-react";
+import { SCAN_CAPTURE_PHASES, type ScanPhaseId } from "./constants/scanCapturePhases";
 
 type Photo = {
   blob: Blob;
@@ -27,7 +28,7 @@ type Photo = {
 
 type Metrics = { footLengthMm: number; forefootWidthMm: number };
 
-type PhaseId = 0 | 1 | 2 | 3;
+type PhaseId = ScanPhaseId;
 type FootId = "LEFT" | "RIGHT";
 
 const CAPTURE_EVERY_MS = 800;
@@ -39,28 +40,7 @@ const MAX_OUTPUT_DIM = 1024; // downscale to reduce memory/traffic
 const JPEG_QUALITY = 0.82;
 const DEFAULT_METRICS: Metrics = { footLengthMm: 265, forefootWidthMm: 95 };
 
-const PHASES: { id: PhaseId; name: string; instruction: string }[] = [
-  {
-    id: 0,
-    name: "FRONTALE/TALLONE",
-    instruction: "Inquadra il tallone e inclina verso la pianta",
-  },
-  {
-    id: 1,
-    name: "LATO INTERNO",
-    instruction: "Muovi il telefono lentamente verso l'interno del piede",
-  },
-  {
-    id: 2,
-    name: "LATO ESTERNO",
-    instruction: "Muovi il telefono verso l'esterno, mantieni la distanza",
-  },
-  {
-    id: 3,
-    name: "PUNTA/SUPERIORE",
-    instruction: "Inquadra le dita e la parte dorsale dall'alto",
-  },
-];
+const PHASES = SCAN_CAPTURE_PHASES;
 
 const clamp = (n: number, min: number, max: number) => Math.max(min, Math.min(max, n));
 
