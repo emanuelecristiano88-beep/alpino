@@ -24,7 +24,7 @@ function BottomNav({ tab, setTab }: { tab: TabId; setTab: (t: TabId) => void }) 
   const items = useMemo(() => NAV_ITEMS, []);
 
   return (
-    <nav className="fixed bottom-0 left-0 right-0 z-50 border-t border-zinc-800 bg-zinc-950/95 backdrop-blur-md">
+    <nav className="fixed bottom-0 left-0 right-0 z-50 border-t border-zinc-800 bg-black">
       <div className="mx-auto grid w-full max-w-lg grid-cols-4 px-1 pb-[env(safe-area-inset-bottom,0px)]">
         {items.map(({ id, label, Icon }) => {
           const active = tab === id;
@@ -35,7 +35,7 @@ function BottomNav({ tab, setTab }: { tab: TabId; setTab: (t: TabId) => void }) 
               variant="ghost"
               className={cn(
                 "flex h-auto flex-col gap-1 rounded-none py-3 text-zinc-500 hover:bg-transparent hover:text-zinc-300",
-                active && "text-blue-500"
+                active && "text-white"
               )}
               onClick={() => setTab(id)}
               aria-current={active ? "page" : undefined}
@@ -48,7 +48,7 @@ function BottomNav({ tab, setTab }: { tab: TabId; setTab: (t: TabId) => void }) 
               >
                 <Icon className={cn("h-6 w-6", active ? "text-white" : "text-current")} strokeWidth={active ? 2 : 1.75} />
               </span>
-              <span className={cn("text-[10px] font-medium", active ? "font-semibold text-blue-500" : "text-zinc-500")}>
+              <span className={cn("text-[10px] font-medium", active ? "font-semibold text-white" : "text-zinc-500")}>
                 {label}
               </span>
             </Button>
@@ -61,12 +61,12 @@ function BottomNav({ tab, setTab }: { tab: TabId; setTab: (t: TabId) => void }) 
 
 function MenuScreen({ onOpenScanner }: { onOpenScanner: () => void }) {
   return (
-    <div className="min-h-[100dvh] bg-zinc-950 pb-24 text-zinc-100">
+    <div className="min-h-[100dvh] bg-neutral-200 pb-24 text-zinc-900">
       <div className="px-5 pt-6">
-        <div className="text-2xl font-semibold tracking-tight text-zinc-100">Menu</div>
-        <p className="mt-2 text-sm text-zinc-400">
+        <div className="text-2xl font-semibold tracking-tight text-zinc-900">Menu</div>
+        <p className="mt-2 text-sm text-zinc-600">
           Scanner fotogrammetrico piede.{" "}
-          <span className="text-xs text-blue-400">(build Shadcn + Tailwind)</span>
+          <span className="text-xs text-blue-600">(build Shadcn + Tailwind)</span>
         </p>
         <p className="mt-2 font-mono text-[10px] text-zinc-500">
           Build: {ALPINO_UI_BUILD_ID} — se non vedi questa riga, Vercel non sta servendo questo repository.
@@ -82,22 +82,34 @@ function MenuScreen({ onOpenScanner }: { onOpenScanner: () => void }) {
         </Button>
 
         <div className="mt-8 space-y-2">
-          <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Informazioni</p>
-          <Button variant="outline" className="w-full justify-start gap-2" asChild>
+          <p className="text-xs font-medium uppercase tracking-wide text-zinc-500">Informazioni</p>
+          <Button
+            variant="outline"
+            className="w-full justify-start gap-2 border-neutral-300 bg-white text-zinc-900 hover:bg-neutral-50"
+            asChild
+          >
             <Link to="/tecnologia-tpu">
-              <Layers className="h-4 w-4 shrink-0 text-blue-500" />
+              <Layers className="h-4 w-4 shrink-0 text-blue-600" />
               Tecnologia TPU &amp; stampanti 3D
             </Link>
           </Button>
-          <Button variant="outline" className="w-full justify-start gap-2" asChild>
+          <Button
+            variant="outline"
+            className="w-full justify-start gap-2 border-neutral-300 bg-white text-zinc-900 hover:bg-neutral-50"
+            asChild
+          >
             <Link to="/guida-stampa">
-              <FileText className="h-4 w-4 shrink-0 text-blue-500" />
+              <FileText className="h-4 w-4 shrink-0 text-blue-600" />
               Guida stampa &amp; calibrazione A4
             </Link>
           </Button>
-          <Button variant="outline" className="w-full justify-start gap-2" asChild>
+          <Button
+            variant="outline"
+            className="w-full justify-start gap-2 border-neutral-300 bg-white text-zinc-900 hover:bg-neutral-50"
+            asChild
+          >
             <Link to="/prepara-scansione">
-              <Book className="h-4 w-4 shrink-0 text-blue-500" />
+              <Book className="h-4 w-4 shrink-0 text-blue-600" />
               Prepara scansione (privacy)
             </Link>
           </Button>
@@ -109,10 +121,10 @@ function MenuScreen({ onOpenScanner }: { onOpenScanner: () => void }) {
 
 function PlaceholderScreen({ title }: { title: string }) {
   return (
-    <div className="min-h-[100dvh] bg-zinc-950 pb-24 text-zinc-100">
+    <div className="min-h-[100dvh] bg-neutral-200 pb-24 text-zinc-900">
       <div className="px-5 pt-6">
-        <div className="text-2xl font-semibold tracking-tight text-zinc-100">{title}</div>
-        <p className="mt-2 text-sm text-zinc-400">Schermata in arrivo.</p>
+        <div className="text-2xl font-semibold tracking-tight text-zinc-900">{title}</div>
+        <p className="mt-2 text-sm text-zinc-600">Schermata in arrivo.</p>
       </div>
     </div>
   );
@@ -144,7 +156,7 @@ export default function AppShell() {
   };
 
   return (
-    <div className="min-h-[100dvh] bg-zinc-950">
+    <div className="min-h-[100dvh] bg-neutral-200">
       {tab === "library" ? <LibraryScreen onOpenScanner={openScannerFlow} /> : null}
       {tab === "albums" ? <PlaceholderScreen title="Albums" /> : null}
       {tab === "explore" ? <PlaceholderScreen title="Explore" /> : null}

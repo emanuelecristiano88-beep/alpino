@@ -5,6 +5,9 @@
 /* Shadcn / Zinc — preset dark di default, radius 0.75rem, font Inter (sans) */
 @layer base {
   :root {
+    /* Palette tipo e-commerce footwear (ref. Zellerfeld): grigio pagina, CTA blu */
+    --zf-grey: 0 0% 90%;
+    --zf-grey-well: 0 0% 88%;
     --radius: 0.75rem;
     --background: 0 0% 100%;
     --foreground: 240 10% 3.9%;

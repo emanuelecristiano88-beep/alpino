@@ -33,16 +33,15 @@ type ScanItem = {
 };
 
 function SquareThumbPlaceholder({ seed }: { seed: number }) {
+  /** Sfondo grigio uniforme (stile catalogo / Zellerfeld), leggera variazione per distinguere le card */
   const bg = useMemo(() => {
-    const a = 22 + (seed * 17) % 28;
-    const b = 32 + (seed * 23) % 24;
-    const c = 45 + (seed * 11) % 35;
-    return `linear-gradient(155deg, rgb(${a + 8}, ${b + 12}, ${c + 18}), rgb(${a}, ${b}, ${c}))`;
+    const t = 6 + (seed * 13) % 10;
+    return `linear-gradient(145deg, rgb(${228 + t}, ${228 + t}, ${228 + t}), rgb(${212 + t}, ${212 + t}, ${212 + t}))`;
   }, [seed]);
 
   return (
     <div
-      className="aspect-square w-full rounded-md border border-zinc-800 bg-zinc-900 shadow-inner"
+      className="aspect-square w-full rounded-md border border-neutral-300 bg-neutral-200 shadow-inner"
       style={{ backgroundImage: bg }}
     />
   );
@@ -165,26 +164,26 @@ export default function LibraryScreen({ onOpenScanner }: LibraryScreenProps) {
   }, [selectedScan, coloreSelezionato, orderSent, orderSending, scanMetrics]);
 
   return (
-    <div className="min-h-[100dvh] bg-zinc-950 pb-28 text-zinc-100">
+    <div className="min-h-[100dvh] bg-neutral-200 pb-28 text-zinc-900">
       <div className="px-5 pt-5">
         <HomeScanHero onOpenScanner={onOpenScanner} />
 
         <section className="mt-8" aria-labelledby="catalogo-scarpe-heading">
-          <h2 id="catalogo-scarpe-heading" className="text-lg font-semibold tracking-tight text-zinc-100">
+          <h2 id="catalogo-scarpe-heading" className="text-lg font-semibold tracking-tight text-zinc-900">
             Catalogo modelli
           </h2>
-          <p className="mt-1 text-sm text-zinc-400">Prova virtualmente in AR prima di personalizzare la tua scarpa.</p>
+          <p className="mt-1 text-sm text-zinc-600">Prova virtualmente in AR prima di personalizzare la tua scarpa.</p>
           <div className="mt-4 grid grid-cols-2 gap-4 sm:grid-cols-2">
             {SHOE_CATALOG.map((shoe) => (
               <Card
                 key={shoe.id}
-                className="overflow-hidden border-zinc-800 bg-zinc-900/90 shadow-md shadow-black/20"
+                className="overflow-hidden border border-neutral-300 bg-white shadow-sm"
               >
                 <CardContent className="space-y-3 p-4">
                   <div
                     className={cn(
-                      "relative flex aspect-[4/3] w-full items-center justify-center overflow-hidden rounded-lg border border-zinc-800",
-                      "bg-gradient-to-br from-sky-950/40 to-zinc-950"
+                      "relative flex aspect-[4/3] w-full items-center justify-center overflow-hidden rounded-lg",
+                      "bg-neutral-200"
                     )}
                   >
                     {shoe.previewSrc ? (
@@ -197,14 +196,13 @@ export default function LibraryScreen({ onOpenScanner }: LibraryScreenProps) {
                     ) : null}
                   </div>
                   <div>
-                    <p className="font-semibold text-zinc-100">{shoe.name}</p>
-                    <p className="text-xs text-zinc-500">{shoe.subtitle}</p>
+                    <p className="font-semibold text-zinc-900">{shoe.name}</p>
+                    <p className="text-xs text-zinc-600">{shoe.subtitle}</p>
                   </div>
                   <div className="flex flex-col gap-2">
                     <Button
                       type="button"
-                      variant="outline"
-                      className="w-full border-sky-500/40 bg-black/30 font-mono text-[10px] font-bold uppercase tracking-[0.14em] text-sky-400 hover:bg-sky-500/10 hover:text-sky-300"
+                      className="w-full bg-blue-600 font-mono text-[10px] font-bold uppercase tracking-[0.14em] text-white shadow-sm hover:bg-blue-700"
                       onClick={() => {
                         setArSelectedShoe(shoe);
                         setArViewerOpen(true);
@@ -219,7 +217,7 @@ export default function LibraryScreen({ onOpenScanner }: LibraryScreenProps) {
           </div>
         </section>
 
-        <h1 className="mt-10 text-2xl font-bold tracking-tight text-zinc-100">Le tue scansioni</h1>
+        <h1 className="mt-10 text-2xl font-bold tracking-tight text-zinc-900">Le tue scansioni</h1>
 
         <div className="relative mt-4">
           <div className="pointer-events-none absolute left-3 top-1/2 z-10 -translate-y-1/2 text-zinc-500">
@@ -229,37 +227,37 @@ export default function LibraryScreen({ onOpenScanner }: LibraryScreenProps) {
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Search"
-            className="h-12 rounded-full border-zinc-800 bg-zinc-900 pl-10 text-zinc-100 placeholder:text-zinc-500"
+            className="h-12 rounded-full border border-neutral-300 bg-white pl-10 text-zinc-900 placeholder:text-zinc-500"
           />
         </div>
 
         <div className="mt-3 flex items-center justify-between text-sm">
-          <Button variant="ghost" size="sm" className="h-auto gap-1 px-0 font-medium text-zinc-400 hover:text-zinc-100">
+          <Button variant="ghost" size="sm" className="h-auto gap-1 px-0 font-medium text-zinc-600 hover:bg-transparent hover:text-zinc-900">
             Filter
             <ChevronDown className="h-4 w-4" strokeWidth={2} />
           </Button>
           <div className="flex items-center gap-4">
-            <Button variant="ghost" size="sm" className="h-auto gap-1 px-0 font-semibold text-zinc-100">
+            <Button variant="ghost" size="sm" className="h-auto gap-1 px-0 font-semibold text-zinc-900 hover:bg-transparent hover:text-zinc-900">
               Created
               <ChevronDown className="h-4 w-4 opacity-70" strokeWidth={2} />
             </Button>
-            <Button variant="ghost" size="sm" className="h-auto px-0 font-medium text-zinc-400 hover:text-zinc-100">
+            <Button variant="ghost" size="sm" className="h-auto px-0 font-medium text-zinc-600 hover:bg-transparent hover:text-zinc-900">
               Select
             </Button>
           </div>
         </div>
 
-        <div className="mt-6 grid grid-cols-2 gap-4 sm:grid-cols-3">
+        <div className="mt-6 grid grid-cols-2 gap-4">
           {filtered.map((it) => (
             <Card
               key={it.id}
-              className="group overflow-hidden border-zinc-800 bg-zinc-900 transition-shadow duration-200 hover:border-zinc-700 hover:shadow-lg hover:shadow-blue-950/20"
+              className="group overflow-hidden border border-neutral-300 bg-white shadow-sm transition-shadow duration-200 hover:border-neutral-400 hover:shadow-md"
             >
               <CardContent className="p-2">
                 <button
                   type="button"
                   onClick={() => openViewer(it)}
-                  className="w-full overflow-hidden rounded-md text-left ring-offset-zinc-950 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 group-hover:ring-2 group-hover:ring-blue-500/40"
+                  className="w-full overflow-hidden rounded-md text-left ring-offset-white transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 focus-visible:ring-offset-2 group-hover:ring-2 group-hover:ring-blue-500/40"
                   aria-label={`Apri visualizzatore 3D per ${it.id}`}
                 >
                   <SquareThumbPlaceholder seed={it.thumbSeed} />
@@ -269,17 +267,17 @@ export default function LibraryScreen({ onOpenScanner }: LibraryScreenProps) {
                 <div className="flex min-w-0 flex-1 items-center gap-2">
                   <Badge
                     variant="secondary"
-                    className="shrink-0 border border-blue-500/35 bg-blue-500/10 text-[10px] font-semibold uppercase tracking-wide text-blue-400"
+                    className="shrink-0 border border-blue-200 bg-blue-50 text-[10px] font-semibold uppercase tracking-wide text-blue-700"
                   >
                     Completato
                   </Badge>
-                  <span className="truncate text-xs font-semibold text-zinc-400">{it.dateLabel}</span>
+                  <span className="truncate text-xs font-semibold text-zinc-600">{it.dateLabel}</span>
                 </div>
                 <Button
                   type="button"
                   variant="ghost"
                   size="icon"
-                  className="h-8 w-8 shrink-0 text-zinc-500 hover:text-blue-500"
+                  className="h-8 w-8 shrink-0 text-zinc-500 hover:text-blue-600"
                   onClick={(e) => e.stopPropagation()}
                   aria-label="Opzioni"
                 >
@@ -506,10 +504,10 @@ export default function LibraryScreen({ onOpenScanner }: LibraryScreenProps) {
               animate={{ scale: 1, opacity: 1 }}
               transition={{ type: "spring", stiffness: 400, damping: 22 }}
             >
-              <Card className="border-zinc-800 bg-zinc-900 shadow-2xl shadow-blue-950/40">
+              <Card className="border border-neutral-200 bg-white shadow-2xl shadow-black/20">
                 <CardContent className="flex flex-col items-center gap-3 px-10 py-8">
-                  <CheckCircle2 className="h-16 w-16 text-blue-500" strokeWidth={2} />
-                  <p className="text-center font-mono text-sm font-semibold text-blue-400">Ordine registrato</p>
+                  <CheckCircle2 className="h-16 w-16 text-blue-600" strokeWidth={2} />
+                  <p className="text-center font-mono text-sm font-semibold text-zinc-900">Ordine registrato</p>
                 </CardContent>
               </Card>
             </motion.div>
