@@ -10,7 +10,7 @@ export type ShoeCatalogItem = {
 
 /**
  * Catalogo modelli scarpe per try-on AR.
- * In produzione: servire `.glb` da `/public/models/` e aggiornare `glbSrc`.
+ * Aggiungi qui nuove voci (glb/stl in `/public/models/`, anteprima in `/public/images/`).
  */
 export const SHOE_CATALOG: ShoeCatalogItem[] = [
   {
@@ -26,26 +26,5 @@ export const SHOE_CATALOG: ShoeCatalogItem[] = [
     subtitle: "Concept foam · gradient arancio/giallo",
     glbSrc: "/models/XAV01.stl",
     previewSrc: "/images/xav01-preview.png",
-  },
-  {
-    id: "alpino-urban",
-    name: "Alpino Urban",
-    subtitle: "Urban · suola leggera",
-    glbSrc:
-      "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/Duck/glTF-Binary/Duck.glb",
-  },
-  {
-    id: "alpino-pro",
-    name: "Alpino Pro",
-    subtitle: "Performance · mesh ventilata",
-    /** GLB leggero: Fox/RobotExpressive bloccano spesso mobile + WebGL */
-    glbSrc: "https://modelviewer.dev/shared-assets/models/Astronaut.glb",
-  },
-  {
-    id: "alpino-classic",
-    name: "Alpino Classic",
-    subtitle: "Daily · comfort",
-    glbSrc:
-      "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/Duck/glTF-Binary/Duck.glb",
   },
 ];
