@@ -31,6 +31,5 @@ export const SHOE_CATALOG: ShoeCatalogItem[] = [
     subtitle: "Concept foam · gradient arancio/giallo",
     glbSrc: "/models/XAV01.stl",
     previewSrc: "/images/xav01-preview.png",
-    previewMergeBlackWithCard: true,
   },
 ];

@@ -210,14 +210,17 @@
   }
 }
 
-/* --- Sezione benefici: testi scuri forzati (html.dark altrimenti eredita --foreground chiaro). --- */
+/* --- Sezione benefici: nero su grigio (html.dark eredita --foreground chiaro sul body). --- */
 .barefoot-benefits {
-  color: #171717;
+  position: relative;
+  z-index: 1;
+  isolation: isolate;
+  color: #000000;
 }
 
 .barefoot-benefits .benefit-section-title,
 .barefoot-benefits .benefit-title {
-  color: #171717 !important;
+  color: #000000 !important;
 }
 
 .barefoot-benefits .benefit-label {
@@ -225,7 +228,7 @@
 }
 
 .barefoot-benefits .benefit-body {
-  color: #3f3f46 !important;
+  color: #171717 !important;
 }
 
 .barefoot-benefits article.benefit-card {

@@ -107,14 +107,14 @@ export default function BarefootBenefitsSection({ className }: BarefootBenefitsS
       id="benefici-piede"
       className={cn(
         "barefoot-benefits scroll-mt-24 border-t border-neutral-300 px-5 pb-8 pt-10 sm:scroll-mt-28",
-        "bg-[#e5e5e5] text-zinc-900",
+        "bg-[#e5e5e5] text-black",
         className
       )}
       aria-labelledby="barefoot-benefits-heading"
     >
       <h2
         id="barefoot-benefits-heading"
-        className="benefit-section-title mb-8 max-w-3xl text-2xl font-semibold tracking-tight text-zinc-900 sm:text-3xl"
+        className="benefit-section-title mb-8 max-w-3xl text-2xl font-semibold tracking-tight text-black sm:text-3xl"
       >
         I benefici del vivere a piedi nudi
       </h2>

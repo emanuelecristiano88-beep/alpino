@@ -16,16 +16,21 @@ export type HomeScanHeroProps = {
 export default function HomeScanHero({ onOpenScanner }: HomeScanHeroProps) {
   return (
     <section
-      className="relative -mx-5 mb-8 overflow-hidden border-y border-neutral-300 bg-neutral-200 sm:mx-0 sm:rounded-2xl sm:border"
+      className="-mx-5 mb-8 overflow-hidden border-y border-neutral-300 bg-neutral-200 sm:mx-0 sm:rounded-2xl sm:border"
       aria-label="Home: scan-to-print"
     >
-      <div className="pointer-events-none absolute inset-0 z-0 opacity-[0.22]">
-        <HoneycombLatticeVisual />
-      </div>
-      <div className="pointer-events-none absolute inset-0 z-0 bg-[radial-gradient(ellipse_90%_70%_at_50%_35%,rgba(59,130,246,0.14),transparent_55%)]" />
-      <div className="pointer-events-none absolute inset-0 z-0 bg-gradient-to-b from-neutral-200/90 via-neutral-200/50 to-neutral-200" />
+      {/*
+        Overlay (honeycomb + gradient) SOLO sul blocco hero: se copre tutta la section,
+        finisce sopra la sezione benefici e schiarisce il testo (illeggibile).
+      */}
+      <div className="relative overflow-hidden">
+        <div className="pointer-events-none absolute inset-0 z-0 opacity-[0.22]">
+          <HoneycombLatticeVisual />
+        </div>
+        <div className="pointer-events-none absolute inset-0 z-0 bg-[radial-gradient(ellipse_90%_70%_at_50%_35%,rgba(59,130,246,0.14),transparent_55%)]" />
+        <div className="pointer-events-none absolute inset-0 z-0 bg-gradient-to-b from-neutral-200/90 via-neutral-200/50 to-neutral-200" />
 
-      <div className="relative z-20 border-b border-neutral-300 bg-neutral-200/95 px-5 pb-10 pt-10 backdrop-blur-sm sm:pt-12">
+        <div className="relative z-20 border-b border-neutral-300 bg-neutral-200/95 px-5 pb-10 pt-10 backdrop-blur-sm sm:pt-12">
         <div className="mx-auto flex max-w-3xl flex-col gap-5 sm:flex-row sm:items-end sm:justify-between sm:gap-8">
           <div className="space-y-3">
             <div className="inline-flex items-center gap-2 rounded-full border border-blue-200 bg-blue-50 px-3 py-1 text-[11px] font-semibold uppercase tracking-wider text-blue-800">
@@ -58,6 +63,7 @@ export default function HomeScanHero({ onOpenScanner }: HomeScanHeroProps) {
               <ChevronDown className="h-4 w-4" aria-hidden />
             </a>
           </div>
+        </div>
         </div>
       </div>
 
