@@ -17,7 +17,6 @@ import BiometricAnalysisPanel from "../components/BiometricAnalysisPanel";
 import ScanFootprint2D from "../components/ScanFootprint2D";
 import { useScanMetrics } from "../hooks/useScanMetrics";
 import VirtualTryOnViewer from "../components/VirtualTryOnViewer";
-import LumaStyleViewer from "../components/LumaStyleViewer";
 import { SHOE_CATALOG, type ShoeCatalogItem } from "../data/shoeCatalog";
 
 const DigitalFittingViewer = lazy(() => import("../../components/three/DigitalFittingViewer"));
@@ -76,8 +75,6 @@ export default function LibraryScreen({ onOpenScanner }: LibraryScreenProps) {
   const [pairReadyForProduction, setPairReadyForProduction] = useState(false);
   const [arViewerOpen, setArViewerOpen] = useState(false);
   const [arSelectedShoe, setArSelectedShoe] = useState<ShoeCatalogItem | null>(null);
-  const [lumaOpen, setLumaOpen] = useState(false);
-  const [lumaShoe, setLumaShoe] = useState<ShoeCatalogItem | null>(null);
 
   const refreshPairFlag = useCallback(() => {
     try {
@@ -184,7 +181,15 @@ export default function LibraryScreen({ onOpenScanner }: LibraryScreenProps) {
                 className="overflow-hidden border-zinc-800 bg-zinc-900/90 shadow-md shadow-black/20"
               >
                 <CardContent className="space-y-3 p-4">
-                  <div className="aspect-[4/3] w-full rounded-lg border border-zinc-800 bg-gradient-to-br from-sky-950/40 to-zinc-950" />
+                  <div className="relative aspect-[4/3] w-full overflow-hidden rounded-lg border border-zinc-800 bg-gradient-to-br from-sky-950/40 to-zinc-950">
+                    {shoe.previewSrc ? (
+                      <img
+                        src={shoe.previewSrc}
+                        alt={shoe.name}
+                        className="h-full w-full object-contain object-center"
+                      />
+                    ) : null}
+                  </div>
                   <div>
                     <p className="font-semibold text-zinc-100">{shoe.name}</p>
                     <p className="text-xs text-zinc-500">{shoe.subtitle}</p>
@@ -200,17 +205,6 @@ export default function LibraryScreen({ onOpenScanner }: LibraryScreenProps) {
                       }}
                     >
                       PROVALA VIRTUALE (AR)
-                    </Button>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      className="w-full border border-sky-500/35 bg-transparent font-mono text-[10px] font-bold uppercase tracking-[0.14em] text-sky-300/90 hover:bg-sky-500/10"
-                      onClick={() => {
-                        setLumaShoe(shoe);
-                        setLumaOpen(true);
-                      }}
-                    >
-                      Luma-style 360°
                     </Button>
                   </div>
                 </CardContent>
@@ -491,16 +485,6 @@ export default function LibraryScreen({ onOpenScanner }: LibraryScreenProps) {
           if (!next) setArSelectedShoe(null);
         }}
         onScanFoot={onOpenScanner}
-      />
-
-      <LumaStyleViewer
-        open={lumaOpen}
-        shoe={lumaShoe}
-        onOpenChange={(next) => {
-          setLumaOpen(next);
-          if (!next) setLumaShoe(null);
-        }}
-        onAdaptFoot={onOpenScanner}
       />
 
       <AnimatePresence>
