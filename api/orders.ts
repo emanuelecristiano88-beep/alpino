@@ -6,6 +6,11 @@ export const config = { runtime: "edge" };
 
 type OrderBody = {
   scanId?: string;
+  /** JSON string da `serializeBiometryForMac` (NEUMA biometria) */
+  biometryJson?: string;
+  /** Stesso payload come oggetto (opzionale) */
+  biometryPayload?: Record<string, unknown>;
+  source?: string;
   tagliaScelta?: string;
   coloreSelezionato?: string;
   millimetri?: {
@@ -31,6 +36,13 @@ export default async function handler(request: Request): Promise<Response> {
     console.log("[NEUMA] Nuovo ordine in produzione (Vercel Edge)");
     console.log("  orderId:", orderId);
     console.log("  scanId:", body.scanId ?? "(mancante)");
+    console.log("  source:", body.source ?? "(mancante)");
+    if (body.biometryJson) {
+      console.log("  biometryJson length:", body.biometryJson.length, "chars");
+    }
+    if (body.biometryPayload && typeof body.biometryPayload === "object") {
+      console.log("  biometryPayload.schema:", (body.biometryPayload as { schema?: string }).schema ?? "?");
+    }
     console.log("  tagliaScelta:", body.tagliaScelta ?? "(mancante)");
     console.log("  coloreSelezionato:", body.coloreSelezionato ?? "(mancante)");
     console.log("  millimetri:", JSON.stringify(body.millimetri ?? {}, null, 2));

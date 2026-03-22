@@ -8,7 +8,8 @@
     "dev:https": "vite --host",
     "build": "vite build",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "pdf:guida": "node scripts/generate-neuma-guida-pdf.mjs --open"
   },
   "dependencies": {
     "@ar-js-org/aruco-rs": "^0.1.0",

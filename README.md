@@ -52,7 +52,7 @@ Progetto **Vite + React** (SPA) con API in **`/api/*.ts`** (Vercel Serverless: `
 2. Dalla cartella del progetto: `vercel` (prima volta) oppure `vercel --prod` per produzione.
 3. In dashboard Vercel verifica **Framework Preset: Vite** e **Output: `dist`** (già indicati in `vercel.json`).
 
-**Rotte client** (`/tecnologia-tpu`, `/guida-stampa`, `/guida-scansione` tutorial cliente, ecc.): gestite da React Router; `vercel.json` reindirizza le richieste SPA a `index.html` (le API `/api/*` hanno priorità sulle rewrite).
+**Rotte client** (`/tecnologia-tpu`, `/guida-stampa`, `/guida-scansione`, `/bussola-del-piede`, `/su-misura`, ecc.): gestite da React Router; `vercel.json` reindirizza le richieste SPA a `index.html` (le API `/api/*` hanno priorità sulle rewrite).
 
 **Nota:** la vecchia cartella `app/api/.../route.ts` (stile Next.js) è stata spostata in `docs/backend-reference-next-app-router/` per evitare che Vercel confonda il progetto con Next senza `next` installato.
 

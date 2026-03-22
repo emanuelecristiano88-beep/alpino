@@ -1,28 +1,64 @@
-import { jsPDF } from "jspdf";
-import { ARUCO_4X4_50 } from "../components/scannerTarget/aruco4x4_50";
-import {
-  MARKER_CENTER_MM,
-  MARGIN_MM,
-  MARKER_SIDE_MM,
-  SHEET_H_MM,
-  SHEET_W_MM,
-} from "./biometry/sheetGeometry";
-
-const W = SHEET_W_MM;
-const H = SHEET_H_MM;
-/** Bordo superiore dei marker ArUco in basso (mm, origine in alto) — il testo non deve invadere questa fascia */
-const BOTTOM_MARKER_TOP_Y_MM = SHEET_H_MM - MARGIN_MM - MARKER_SIDE_MM;
-
 /**
- * Marker ArUco DICT_4X4_50 (griglia 6×6 come OpenCV generateImageMarker) — stesso layout di `ScannerTarget.tsx`.
+ * Stesso output di `src/lib/guidaStampaPdf.ts` — eseguibile con Node senza tsx:
+ *   node scripts/generate-neuma-guida-pdf.mjs
+ *   npm run pdf:guida   (genera + apre Anteprima su macOS)
  */
-function drawArucoMarker(
-  doc: jsPDF,
-  id: 0 | 1 | 2 | 3,
-  originX: number,
-  originY: number,
-  sizeMm: number
-) {
+import { writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { jsPDF } from "jspdf";
+
+/** Allineato a `aruco4x4_50.ts` */
+const ARUCO_4X4_50 = {
+  0: [
+    [0, 0, 0, 0, 0, 0],
+    [0, 255, 0, 255, 255, 0],
+    [0, 0, 255, 0, 255, 0],
+    [0, 0, 0, 255, 255, 0],
+    [0, 0, 0, 255, 0, 0],
+    [0, 0, 0, 0, 0, 0],
+  ],
+  1: [
+    [0, 0, 0, 0, 0, 0],
+    [0, 0, 0, 0, 0, 0],
+    [0, 255, 255, 255, 255, 0],
+    [0, 255, 0, 0, 255, 0],
+    [0, 255, 0, 255, 0, 0],
+    [0, 0, 0, 0, 0, 0],
+  ],
+  2: [
+    [0, 0, 0, 0, 0, 0],
+    [0, 0, 0, 255, 255, 0],
+    [0, 0, 0, 255, 255, 0],
+    [0, 0, 0, 255, 0, 0],
+    [0, 255, 255, 0, 255, 0],
+    [0, 0, 0, 0, 0, 0],
+  ],
+  3: [
+    [0, 0, 0, 0, 0, 0],
+    [0, 255, 0, 0, 255, 0],
+    [0, 255, 0, 0, 255, 0],
+    [0, 0, 255, 0, 0, 0],
+    [0, 0, 255, 255, 0, 0],
+    [0, 0, 0, 0, 0, 0],
+  ],
+};
+
+const W = 210;
+const H = 297;
+const MARGIN_MM = 10;
+const MARKER_SIDE_MM = 24;
+/** Bordo superiore marker in basso — testo sopra questa Y */
+const BOTTOM_MARKER_TOP_Y_MM = H - MARGIN_MM - MARKER_SIDE_MM;
+
+const MARKER_CENTER_MM = {
+  0: [MARGIN_MM + MARKER_SIDE_MM / 2, MARGIN_MM + MARKER_SIDE_MM / 2],
+  1: [W - MARGIN_MM - MARKER_SIDE_MM / 2, MARGIN_MM + MARKER_SIDE_MM / 2],
+  2: [MARGIN_MM + MARKER_SIDE_MM / 2, H - MARGIN_MM - MARKER_SIDE_MM / 2],
+  3: [W - MARGIN_MM - MARKER_SIDE_MM / 2, H - MARGIN_MM - MARKER_SIDE_MM / 2],
+};
+
+function drawArucoMarker(doc, id, originX, originY, sizeMm) {
   const grid = ARUCO_4X4_50[id];
   const cell = sizeMm / 6;
   for (let row = 0; row < 6; row++) {
@@ -35,7 +71,7 @@ function drawArucoMarker(
   }
 }
 
-function drawMillimeterGrid(doc: jsPDF) {
+function drawMillimeterGrid(doc) {
   doc.setLineWidth(0.04);
   doc.setDrawColor(250, 250, 250);
   for (let x = 0; x <= W; x += 1) {
@@ -64,8 +100,7 @@ function drawMillimeterGrid(doc: jsPDF) {
   }
 }
 
-/** Documento PDF pronto (browser: `.save()`; Node: `.output('arraybuffer')`). */
-export function createGuidaStampaPdf(): jsPDF {
+function buildPdf() {
   const doc = new jsPDF({ unit: "mm", format: "a4", orientation: "portrait" });
 
   drawMillimeterGrid(doc);
@@ -86,7 +121,6 @@ export function createGuidaStampaPdf(): jsPDF {
   );
   doc.text(subLines, W / 2, 20, { align: "center" });
 
-  /* Area piede (centrale) */
   doc.setDrawColor(70, 70, 70);
   doc.setLineWidth(0.35);
   doc.setLineDashPattern([2.5, 2], 0);
@@ -100,7 +134,7 @@ export function createGuidaStampaPdf(): jsPDF {
   doc.setTextColor(110, 110, 110);
   doc.text("Posiziona il piede nudo qui (vista dall’alto)", W / 2, 54, { align: "center" });
 
-  const origins: { ox: number; oy: number; id: 0 | 1 | 2 | 3 }[] = [
+  const origins = [
     { ox: MARGIN_MM, oy: MARGIN_MM, id: 0 },
     { ox: W - MARGIN_MM - MARKER_SIDE_MM, oy: MARGIN_MM, id: 1 },
     { ox: MARGIN_MM, oy: H - MARGIN_MM - MARKER_SIDE_MM, id: 2 },
@@ -110,7 +144,6 @@ export function createGuidaStampaPdf(): jsPDF {
     drawArucoMarker(doc, o.id, o.ox, o.oy, MARKER_SIDE_MM);
   }
 
-  /* Istruzioni in basso: fascia tra area piede (~233 mm) e marker inferiori (da 263 mm) */
   const footerBandTopY = BOTTOM_MARKER_TOP_Y_MM - 28;
   const footerBandMidY = BOTTOM_MARKER_TOP_Y_MM - 10;
 
@@ -132,6 +165,14 @@ export function createGuidaStampaPdf(): jsPDF {
   return doc;
 }
 
-export function downloadGuidaStampaPdf() {
-  createGuidaStampaPdf().save("neuma-guida-stampa-a4.pdf");
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const outPath = join(__dirname, "..", "neuma-guida-stampa-a4.pdf");
+const doc = buildPdf();
+writeFileSync(outPath, Buffer.from(doc.output("arraybuffer")));
+console.log("Creato:", outPath);
+
+const shouldOpen = process.argv.includes("--open") || process.env.OPEN_PDF === "1";
+if (shouldOpen && process.platform === "darwin") {
+  const { execFileSync } = await import("node:child_process");
+  execFileSync("open", [outPath]);
 }

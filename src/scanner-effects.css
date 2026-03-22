@@ -229,3 +229,20 @@
       transparent 2px
     );
 }
+
+/** Anteprima biometria NEUMA — contorno piede “scansione attiva” */
+@keyframes neuma-foot-contour-pulse {
+  0%,
+  100% {
+    opacity: 0.4;
+    filter: drop-shadow(0 0 2px rgb(37 99 235 / 0.45));
+  }
+  50% {
+    opacity: 1;
+    filter: drop-shadow(0 0 14px rgb(56 189 248 / 0.95));
+  }
+}
+
+.neuma-foot-contour-pulse {
+  animation: neuma-foot-contour-pulse 1.85s ease-in-out infinite;
+}

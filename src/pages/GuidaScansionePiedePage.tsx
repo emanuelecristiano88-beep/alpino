@@ -194,7 +194,18 @@ export default function GuidaScansionePiedePage() {
           </Button>
         </div>
 
-        <p className="mt-8 text-center text-xs text-zinc-500">
+        <p className="mt-6 text-center text-xs text-zinc-600">
+          Approfondimenti:{" "}
+          <Link to="/su-misura" className="font-medium text-blue-600 underline-offset-4 hover:underline">
+            Calzature su misura
+          </Link>
+          {" · "}
+          <Link to="/bussola-del-piede" className="font-medium text-blue-600 underline-offset-4 hover:underline">
+            Bussola del piede
+          </Link>
+        </p>
+
+        <p className="mt-3 text-center text-xs text-zinc-500">
           NEUMA · scansione fotogrammetrica · dubbi? Contatta il supporto del tuo rivenditore.
         </p>
       </div>

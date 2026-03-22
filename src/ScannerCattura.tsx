@@ -13,6 +13,13 @@ import { requestOrientationAccess, useDeviceTilt } from "./hooks/useDeviceTilt";
 import ScannerAlignmentOverlay from "./components/scanner/ScannerAlignmentOverlay";
 import ArucoMarkerPins from "./components/scanner/ArucoMarkerPins";
 import ScannerShutterButton from "./components/scanner/ScannerShutterButton";
+import BiometryOverlayPreview from "./components/scanner/BiometryOverlayPreview";
+import {
+  computeNeumaBiometryFromImageData,
+  serializeBiometryForMac,
+  type NeumaBiometryResult,
+} from "./lib/biometry";
+import type { Mat3 } from "./lib/biometry/homography";
 import { Smartphone } from "lucide-react";
 
 type Photo = {
@@ -99,6 +106,17 @@ async function playClick(audioCtxRef: React.MutableRefObject<AudioContext | null
   } catch {
     // ignore audio errors
   }
+}
+
+async function blobToImageData(blob: Blob): Promise<ImageData> {
+  const bmp = await createImageBitmap(blob);
+  const canvas = document.createElement("canvas");
+  canvas.width = bmp.width;
+  canvas.height = bmp.height;
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  if (!ctx) throw new Error("Canvas 2D non disponibile");
+  ctx.drawImage(bmp, 0, 0);
+  return ctx.getImageData(0, 0, canvas.width, canvas.height);
 }
 
 async function captureFrameAsJpeg(video: HTMLVideoElement) {
@@ -229,6 +247,11 @@ export default function ScannerCattura() {
   const pairComplete = photosLeft.length === TOTAL_PHOTOS && photosRight.length === TOTAL_PHOTOS;
 
   const [flashNonce, setFlashNonce] = useState(0);
+  const [biometryResult, setBiometryResult] = useState<NeumaBiometryResult | null>(null);
+  const [biometryBusy, setBiometryBusy] = useState(false);
+  const [biometrySourceIndex, setBiometrySourceIndex] = useState(0);
+  const [officinaBusy, setOfficinaBusy] = useState(false);
+  const [officinaOk, setOfficinaOk] = useState(false);
   const [processingProgress, setProcessingProgress] = useState(0);
   const [processingScanId, setProcessingScanId] = useState<string | null>(null);
   const [processingReady, setProcessingReady] = useState(false);
@@ -242,6 +265,42 @@ export default function ScannerCattura() {
   useEffect(() => {
     currentFootRef.current = currentFoot;
   }, [currentFoot]);
+
+  /** Biometria NEUMA: prova foto rappresentative (fine fase) fino a calibrazione OK */
+  useEffect(() => {
+    if (!pairComplete) {
+      setBiometryResult(null);
+      setBiometryBusy(false);
+      setOfficinaOk(false);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      setBiometryBusy(true);
+      const candidates = [7, 15, 23, 31, 8, 16, 24, 0, 4, 12];
+      try {
+        for (const idx of candidates) {
+          const p = photosLeft[idx];
+          if (!p?.blob) continue;
+          const imageData = await blobToImageData(p.blob);
+          const res = await computeNeumaBiometryFromImageData(imageData);
+          if (cancelled) return;
+          if (res.calibration.ok) {
+            setBiometryResult(res);
+            setBiometrySourceIndex(idx);
+            break;
+          }
+        }
+      } catch {
+        /* silenzioso: overlay opzionale */
+      } finally {
+        if (!cancelled) setBiometryBusy(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [pairComplete, photosLeft]);
 
   const scanOverlayEnabled = cameraState === "readyPhase" || cameraState === "capturingPhase";
   const alignment = useScanAlignmentAnalysis(videoRef, scanOverlayEnabled, phaseIndex);
@@ -579,6 +638,9 @@ export default function ScannerCattura() {
     setFps(0);
     if (typeof sessionStorage !== "undefined") sessionStorage.removeItem(PAIR_STORAGE_KEY);
     autoStartedPhaseRef.current = -1;
+    setBiometryResult(null);
+    setBiometryBusy(false);
+    setOfficinaOk(false);
     setAcceptTerms(false);
     setCameraState("idle");
   };
@@ -655,6 +717,42 @@ export default function ScannerCattura() {
       stopProcessing();
       setCameraState("review");
       setError(`ERRORE_UPLOAD // ${e?.message || String(e)}`);
+    }
+  };
+
+  const sendBiometryToOfficina = async () => {
+    if (!biometryResult?.calibration.ok) return;
+    setOfficinaBusy(true);
+    setOfficinaOk(false);
+    setError("");
+    try {
+      const raw = serializeBiometryForMac(biometryResult);
+      const sid = scanId || crypto.randomUUID();
+      if (!scanId) setScanId(sid);
+      const headers = new Headers({ "Content-Type": "application/json" });
+      const sec = import.meta.env.VITE_UPLOAD_API_SECRET as string | undefined;
+      if (sec) headers.set("x-upload-secret", sec);
+      const res = await fetch("/api/orders", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          scanId: sid,
+          biometryJson: raw,
+          biometryPayload: biometryResult.exportPayload,
+          source: "scanner_biometry_v1",
+        }),
+      });
+      if (!res.ok) {
+        const t = await res.text().catch(() => "");
+        throw new Error(t || `HTTP ${res.status}`);
+      }
+      const data = await res.json().catch(() => null);
+      if (data && !data.ok) throw new Error(data.error || "Ordine non registrato");
+      setOfficinaOk(true);
+    } catch (e: unknown) {
+      setError(`OFFICINA // ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setOfficinaBusy(false);
     }
   };
 
@@ -968,6 +1066,26 @@ export default function ScannerCattura() {
               </div>
             ) : null}
 
+            {pairComplete && biometryBusy ? (
+              <div className="mx-4 mt-4 rounded-xl border border-blue-500/30 bg-blue-500/10 px-4 py-3 text-center font-mono text-xs text-sky-300">
+                Analisi biometria millimetrica in corso…
+              </div>
+            ) : null}
+
+            {pairComplete && biometryResult?.calibration.ok && photosLeft[biometrySourceIndex] ? (
+              <div className="mx-4 mt-4 space-y-2">
+                <BiometryOverlayPreview
+                  imageUrl={photosLeft[biometrySourceIndex].url}
+                  worldMmToImagePx={biometryResult.calibration.homographyWorldMmToImagePx as Mat3}
+                  contourMm={biometryResult.footContourMm}
+                  keypoints={biometryResult.keypoints.filter(
+                    (k) => k.id === "hallux_tip" || k.id === "heel_center"
+                  )}
+                  mmPerPixelEstimate={biometryResult.calibration.mmPerPixelEstimate}
+                />
+              </div>
+            ) : null}
+
             <div className="mx-4 mt-4 grid grid-cols-3 gap-3 pb-8">
               {photos.map((p, idx) => (
                 <div key={p.url} className="overflow-hidden rounded-xl border border-zinc-800 bg-zinc-900/50">
@@ -991,6 +1109,21 @@ export default function ScannerCattura() {
               >
                 INVIA PAIO IN PRODUZIONE
               </Button>
+
+              <Button
+                type="button"
+                variant="default"
+                onClick={() => void sendBiometryToOfficina()}
+                disabled={!biometryResult?.calibration.ok || officinaBusy}
+                className="h-auto w-full rounded-xl border border-sky-500/50 bg-sky-600 px-6 py-4 font-mono text-lg tracking-[0.14em] text-white shadow-lg shadow-sky-600/25 hover:bg-sky-500 disabled:opacity-40"
+              >
+                {officinaBusy ? "INVIO IN CORSO…" : "INVIA ALL'OFFICINA"}
+              </Button>
+              {officinaOk ? (
+                <p className="text-center font-mono text-[11px] text-emerald-400">
+                  Dati biometrici registrati per l&apos;officina.
+                </p>
+              ) : null}
 
               <Button
                 type="button"

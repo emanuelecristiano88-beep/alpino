@@ -24,6 +24,7 @@ Sul **foglio NEUMA** stampato c’è una **griglia** e una **sagoma** piede: il 
 - Foglio piegato o stampato riscalato  
 - Foto senza vedere i marker agli angoli  
 
----
+## Altre pagine informative (italiano)
 
-*Riferimenti di settore su processi simili: [Snapfeet — Made to measure](https://snapfeet.io/made-to-measure/), [Foot Compass](https://snapfeet.io/foot-compass/) (siti esterni).*
+- **`/bussola-del-piede`** — analisi di rappresentatività del piede tester rispetto a un database di riferimento.
+- **`/su-misura`** — calzature su misura, confronto tra metodi di misura e percorso NEUMA.

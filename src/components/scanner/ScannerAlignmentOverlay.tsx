@@ -15,7 +15,7 @@ export type ScannerAlignmentOverlayProps = {
 };
 
 /**
- * Overlay stile Snapfeet: prisma 3D centrale, pin ArUco sul video, guida dark/trasparente.
+ * Overlay guida professionale: prisma 3D centrale, pin ArUco sul video, guida dark/trasparente.
  */
 export default function ScannerAlignmentOverlay({ alignment, className }: ScannerAlignmentOverlayProps) {
   const { guide, footInFrame, isPositionCorrect } = alignment;

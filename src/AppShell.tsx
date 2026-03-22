@@ -2,7 +2,18 @@
 
 import React, { useEffect, useMemo, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
-import { Book, FileText, Folder, Globe, Layers, Menu as MenuIcon, ScanLine, X } from "lucide-react";
+import {
+  Book,
+  Compass,
+  FileText,
+  Folder,
+  Globe,
+  Layers,
+  Menu as MenuIcon,
+  ScanLine,
+  Sparkles,
+  X,
+} from "lucide-react";
 import ScannerCattura from "./ScannerCattura";
 import LibraryScreen from "./screens/LibraryScreen";
 import ScanTutorialModal from "./components/ScanTutorialModal";
@@ -123,6 +134,26 @@ function MenuScreen({ onOpenScanner }: { onOpenScanner: () => void }) {
             <Link to="/guida-scansione">
               <ScanLine className="h-4 w-4 shrink-0 text-blue-600" />
               Guida: come scansionare il piede
+            </Link>
+          </Button>
+          <Button
+            variant="outline"
+            className="w-full justify-start gap-2 border-neutral-300 bg-white text-zinc-900 hover:bg-neutral-50"
+            asChild
+          >
+            <Link to="/bussola-del-piede">
+              <Compass className="h-4 w-4 shrink-0 text-blue-600" />
+              Bussola del piede
+            </Link>
+          </Button>
+          <Button
+            variant="outline"
+            className="w-full justify-start gap-2 border-neutral-300 bg-white text-zinc-900 hover:bg-neutral-50"
+            asChild
+          >
+            <Link to="/su-misura">
+              <Sparkles className="h-4 w-4 shrink-0 text-blue-600" />
+              Calzature su misura
             </Link>
           </Button>
         </div>
