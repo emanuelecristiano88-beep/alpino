@@ -68,6 +68,10 @@ Questo documento fornisce una panoramica dei file chiave che gestiscono il fluss
     * Contiene le immagini referenziate (es. `neuma-a4-target-preview.png`, `tutorial-intro-operator-scene.png`, `scan-guides/phase-0.png` … `phase-3.png`).
     * Vedi anche `public/scan-guides/README.md` per l’elenco delle fasi associate ai file.
 
+## 4. UX e anteprima mesh (STL)
+
+* **`docs/UX-e-anteprima-STL.md`** — idee di miglioramento UX e come collegare l’anteprima STL quando il backend espone un URL del mesh.
+
 ---
 
 *Documento generato per orientamento nel codebase; aggiornare se si aggiungono nuovi entry point o flussi.*

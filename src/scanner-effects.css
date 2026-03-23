@@ -209,6 +209,38 @@
   }
 }
 
+/** Lampo rapido durante burst (8×): feedback leggero, non “8 scatti” espliciti */
+.burst-micro-flash {
+  position: absolute;
+  inset: 0;
+  border: 0 solid rgba(255, 255, 255, 0);
+  pointer-events: none;
+}
+
+.burst-micro-flash::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border: 6px solid rgba(255, 255, 255, 0);
+  background: rgba(255, 255, 255, 0);
+  animation: burst-micro-flash-anim 52ms ease-out both;
+}
+
+@keyframes burst-micro-flash-anim {
+  0% {
+    border-color: rgba(255, 255, 255, 0);
+    background: rgba(255, 255, 255, 0);
+  }
+  35% {
+    border-color: rgba(147, 197, 253, 0.55);
+    background: rgba(59, 130, 246, 0.07);
+  }
+  100% {
+    border-color: rgba(255, 255, 255, 0);
+    background: rgba(255, 255, 255, 0);
+  }
+}
+
 /* Nessun @layer qui: questo file è importato dopo index.css e Tailwind non ripete @tailwind in ogni chunk. */
 .bg-grid-tech {
   background-size: 20px 20px;

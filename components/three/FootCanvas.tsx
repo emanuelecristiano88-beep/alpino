@@ -1,15 +1,88 @@
 "use client";
 
 import React, { Suspense, useEffect, useMemo, useRef } from "react";
-import { Canvas } from "@react-three/fiber";
+import { Canvas, useThree } from "@react-three/fiber";
 import { Environment, Html, OrbitControls, useGLTF } from "@react-three/drei";
 import * as THREE from "three";
+import { useThreePerformanceProfile } from "@/hooks/useThreePerformanceProfile";
+
+/** Piano ombra: solo ombre proiettate, look “prodotto” */
+function ContactShadowPlane() {
+  return (
+    <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.002, 0]} receiveShadow>
+      <planeGeometry args={[14, 14]} />
+      <shadowMaterial opacity={0.2} transparent />
+    </mesh>
+  );
+}
+
+type StudioLightingProps = {
+  shadowMapSize: number;
+  shadowRadius: number;
+  useSoftShadows: boolean;
+};
+
+/**
+ * Key (alto-sinistra), fill (debole, lato opposto), ambiente basso + ombre.
+ * Su mobile: mappa ombre più piccola e radius ridotto (PCF invece di PCF soft).
+ */
+function StudioProductLighting({ shadowMapSize, shadowRadius, useSoftShadows }: StudioLightingProps) {
+  const keyRef = useRef<THREE.DirectionalLight>(null);
+
+  useEffect(() => {
+    const L = keyRef.current;
+    if (!L?.shadow) return;
+    const cam = L.shadow.camera as THREE.OrthographicCamera;
+    L.shadow.mapSize.set(shadowMapSize, shadowMapSize);
+    L.shadow.bias = -0.00012;
+    L.shadow.normalBias = 0.025;
+    L.shadow.radius = useSoftShadows ? shadowRadius : 1.2;
+    cam.near = 0.2;
+    cam.far = 24;
+    cam.left = -3.2;
+    cam.right = 3.2;
+    cam.top = 3.2;
+    cam.bottom = -3.2;
+    cam.updateProjectionMatrix();
+  }, [shadowMapSize, shadowRadius, useSoftShadows]);
+
+  return (
+    <>
+      <ambientLight intensity={0.14} color="#f2f2f4" />
+      {/* Key: morbida, top-left rispetto alla camera frontale */}
+      <directionalLight
+        ref={keyRef}
+        castShadow
+        color="#fff9f5"
+        intensity={1.08}
+        position={[-3.4, 6.2, 2.8]}
+      />
+      {/* Fill: lato opposto, bassa — apre le ombre */}
+      <directionalLight color="#e8eef8" intensity={0.2} position={[3.6, 1.8, -3.2]} />
+    </>
+  );
+}
+
+/** `frameloop="demand"`: orbit damping richiede invalidate ogni frame di interazione. */
+function FootOrbitControlsWithInvalidate() {
+  const { invalidate } = useThree();
+  return (
+    <OrbitControls
+      enablePan={false}
+      minPolarAngle={0.55}
+      maxPolarAngle={Math.PI / 2 - 0.08}
+      onChange={() => invalidate()}
+    />
+  );
+}
 
 type Metrics = { footLengthMm: number; forefootWidthMm: number };
 
 type FootCanvasProps = {
   metrics: Metrics | null;
   shoeUrl?: string; // deve puntare a /public/models/*.glb
+  /** URL mesh piede (STL/GLB) dall’API — preparazione futura; oggi solo metadata sulla shell */
+  meshUrl?: string;
 };
 
 class GLTFErrorBoundary extends React.Component<
@@ -81,6 +154,15 @@ function ShoeModel({ shoeUrl, metrics }: { shoeUrl: string; metrics: Metrics | n
     groupRef.current.position.copy(offset);
   }, [offset]);
 
+  useEffect(() => {
+    scene.traverse((obj) => {
+      if (obj instanceof THREE.Mesh) {
+        obj.castShadow = true;
+        obj.receiveShadow = true;
+      }
+    });
+  }, [scene]);
+
   return (
     <group ref={groupRef} scale={[scaleFactor, scaleFactor, scaleFactor]}>
       <primitive object={scene} />
@@ -88,22 +170,46 @@ function ShoeModel({ shoeUrl, metrics }: { shoeUrl: string; metrics: Metrics | n
   );
 }
 
-export default function FootCanvas({ metrics, shoeUrl = "/models/placeholder_sneaker.glb" }: FootCanvasProps) {
+export default function FootCanvas({
+  metrics,
+  shoeUrl = "/models/placeholder_sneaker.glb",
+  meshUrl,
+}: FootCanvasProps) {
+  const perf = useThreePerformanceProfile();
   const shoeScaleHint = metrics
     ? `scale=${(metrics.footLengthMm / 280).toFixed(3)}`
     : "scale=1.000";
 
   return (
-    <div className="h-[360px] w-full overflow-hidden rounded-xl border border-white/10 bg-black/20">
+    <div
+      className="h-[360px] w-full overflow-hidden rounded-xl border border-white/10 bg-black/20"
+      data-mesh-url={meshUrl ?? ""}
+    >
       <Canvas
-        shadows={false}
-        dpr={[1, 2]}
+        shadows
+        dpr={perf.dpr}
         frameloop="demand"
-        camera={{ position: [0, 0.18, 0.7], fov: 35 }}
-        gl={{ alpha: true, antialias: true, powerPreference: "high-performance" }}
+        camera={{ position: [0, 0.2, 0.72], fov: 34 }}
+        gl={{
+          alpha: true,
+          antialias: !perf.isMobileOrLowTier,
+          stencil: false,
+          powerPreference: "high-performance",
+          toneMapping: THREE.ACESFilmicToneMapping,
+          toneMappingExposure: perf.isMobileOrLowTier ? 1.02 : 1.05,
+        }}
+        onCreated={({ gl }) => {
+          gl.shadowMap.enabled = true;
+          gl.shadowMap.type = perf.useSoftShadows ? THREE.PCFSoftShadowMap : THREE.PCFShadowMap;
+        }}
       >
-        <ambientLight intensity={0.45} />
-        <directionalLight position={[0.35, 0.8, 0.35]} intensity={1.25} />
+        <StudioProductLighting
+          shadowMapSize={perf.directionalShadowMapSize}
+          shadowRadius={perf.shadowRadius}
+          useSoftShadows={perf.useSoftShadows}
+        />
+        <ContactShadowPlane />
+
         <Suspense
           fallback={
             <Html center>
@@ -114,12 +220,12 @@ export default function FootCanvas({ metrics, shoeUrl = "/models/placeholder_sne
           }
         >
           <GLTFErrorBoundary metrics={metrics} shoeUrl={shoeUrl}>
-            <Environment preset="studio" intensity={0.7} />
+            <Environment preset="studio" intensity={0.42} environmentIntensity={0.85} />
             <ShoeModel shoeUrl={shoeUrl} metrics={metrics} />
           </GLTFErrorBoundary>
         </Suspense>
 
-        <OrbitControls enablePan={false} />
+        <FootOrbitControlsWithInvalidate />
       </Canvas>
     </div>
   );

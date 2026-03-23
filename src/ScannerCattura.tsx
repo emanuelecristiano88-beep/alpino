@@ -18,20 +18,26 @@ import ScannerShutterButton from "./components/scanner/ScannerShutterButton";
 import BiometryOverlayPreview from "./components/scanner/BiometryOverlayPreview";
 import { computeNeumaBiometryFromImageData, type NeumaBiometryResult } from "./lib/biometry";
 import type { Mat3 } from "./lib/biometry/homography";
-import { Smartphone } from "lucide-react";
+import { Check, Loader2, Smartphone } from "lucide-react";
 import { SCAN_CAPTURE_PHASES, type ScanPhaseId } from "./constants/scanCapturePhases";
+import type { ScanMeshViewerStatus } from "./types/scanProcessing";
+
+type PhaseId = ScanPhaseId;
 
 type Photo = {
   blob: Blob;
   url: string;
+  /** Fase di scansione (0–3) a cui appartiene il frame (burst nascosto) */
+  phaseId: PhaseId;
 };
 
 type Metrics = { footLengthMm: number; forefootWidthMm: number };
-
-type PhaseId = ScanPhaseId;
 type FootId = "LEFT" | "RIGHT";
 
-const CAPTURE_EVERY_MS = 800;
+/** Allineamento “perfetto” stabile per questo tempo → avvio automatico burst */
+const STABLE_ALIGNMENT_MS = 800;
+/** Intervallo tra frame del burst nascosto (solo backend, nessun feedback visivo per frame) */
+const BURST_FRAME_GAP_MS = 90;
 const PHOTOS_PER_PHASE = 8;
 const TOTAL_PHOTOS = PHOTOS_PER_PHASE * 4;
 /** Vercel: body funzione ~4.5MB — più batch evitano FUNCTION_INVOCATION_FAILED */
@@ -43,10 +49,6 @@ const DEFAULT_METRICS: Metrics = { footLengthMm: 265, forefootWidthMm: 95 };
 const PHASES = SCAN_CAPTURE_PHASES;
 
 const clamp = (n: number, min: number, max: number) => Math.max(min, Math.min(max, n));
-
-function formatCounter(x: number, max: number) {
-  return `FOTO ACQUISITE: ${x} / ${max}`;
-}
 
 function formatMmSs(totalSeconds: number) {
   const s = Math.max(0, Math.floor(totalSeconds));
@@ -123,6 +125,12 @@ async function captureFrameAsJpeg(video: HTMLVideoElement) {
   return blob;
 }
 
+function sleep(ms: number) {
+  return new Promise<void>((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
+}
+
 function ProcessingView({
   progress,
   isReady,
@@ -186,8 +194,6 @@ export default function ScannerCattura() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const videoContainerRef = useRef<HTMLDivElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
-  const captureTimerRef = useRef<number | null>(null);
-  const captureInFlightRef = useRef(false);
 
   const audioCtxRef = useRef<AudioContext | null>(null);
 
@@ -224,8 +230,6 @@ export default function ScannerCattura() {
   const [phaseGuideAccepted, setPhaseGuideAccepted] = useState(false);
 
   const photos = useMemo(() => [...photosLeft, ...photosRight], [photosLeft, photosRight]);
-  const activePhotosCount = currentFoot === "LEFT" ? photosLeft.length : photosRight.length;
-  const totalCaptured = photos.length;
   const pairComplete = photosLeft.length === TOTAL_PHOTOS && photosRight.length === TOTAL_PHOTOS;
 
   const [flashNonce, setFlashNonce] = useState(0);
@@ -236,15 +240,42 @@ export default function ScannerCattura() {
   const [processingScanId, setProcessingScanId] = useState<string | null>(null);
   const [processingReady, setProcessingReady] = useState(false);
   const processingIntervalRef = useRef<number | null>(null);
+  /** Simulazione generazione mesh dopo "VISUALIZZA 3D" (futuro polling API) */
+  const meshGenTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [scanMeshViewerStatus, setScanMeshViewerStatus] = useState<ScanMeshViewerStatus>("idle");
+  const [meshPreviewUrl, setMeshPreviewUrl] = useState<string | null>(null);
   const currentFootRef = useRef<FootId>("LEFT");
   const autoStartedPhaseRef = useRef<number>(-1);
-  const startPhaseCaptureRef = useRef<() => void>(() => {});
+  const startBurstSequenceRef = useRef<() => void>(() => {});
   /** Evita doppio avvio fase (Strict Mode / effetto + click). */
   const capturePhaseLockRef = useRef(false);
+  const phaseIndexRef = useRef<PhaseId>(phaseIndex);
+  const burstInFlightRef = useRef(false);
+  const burstCancelledRef = useRef(false);
+  /** Countdown 3…2…1 prima del burst (una percezione utente per fase) */
+  const [burstCountdown, setBurstCountdown] = useState<number | null>(null);
+  /** Durante i 8 frame: lampi leggeri + pulse (senza numeri) */
+  const [burstMidCapture, setBurstMidCapture] = useState(false);
+  const [burstMicroNonce, setBurstMicroNonce] = useState(0);
+  /** Dopo il burst: check + messaggio prima di avanzare fase */
+  const [showAcquisitionComplete, setShowAcquisitionComplete] = useState(false);
   const prevCameraStateRef = useRef(cameraState);
   useEffect(() => {
     currentFootRef.current = currentFoot;
   }, [currentFoot]);
+
+  useEffect(() => {
+    phaseIndexRef.current = phaseIndex;
+  }, [phaseIndex]);
+
+  useEffect(() => {
+    return () => {
+      if (meshGenTimeoutRef.current) {
+        clearTimeout(meshGenTimeoutRef.current);
+        meshGenTimeoutRef.current = null;
+      }
+    };
+  }, []);
 
   /** Biometria NEUMA: prova foto rappresentative (fine fase) fino a calibrazione OK */
   useEffect(() => {
@@ -306,19 +337,25 @@ export default function ScannerCattura() {
     return `STEP: [${phaseIndex + 1}/4] - ${phase.name}`;
   }, [phaseIndex, phase.name]);
 
+  /** Una tacca per fase (4): percezione 1 acquisizione / fase, 8 frame nascosti sotto */
   const progressTacks = useMemo(() => {
-    const filled = clamp(capturedInPhase, 0, PHOTOS_PER_PHASE);
-    return Array.from({ length: PHOTOS_PER_PHASE }, (_, i) => i < filled);
-  }, [capturedInPhase]);
+    return Array.from({ length: 4 }, (_, i) => i < phaseIndex);
+  }, [phaseIndex]);
+
+  const cancelBurstSequence = () => {
+    burstCancelledRef.current = true;
+    burstInFlightRef.current = false;
+    setBurstCountdown(null);
+    setBurstMidCapture(false);
+    setShowAcquisitionComplete(false);
+  };
 
   const stopCapture = () => {
-    if (captureTimerRef.current) {
-      window.clearInterval(captureTimerRef.current);
-      captureTimerRef.current = null;
-    }
+    /* legacy: burst senza setInterval */
   };
 
   const stopStream = () => {
+    cancelBurstSequence();
     stopCapture();
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((t) => t.stop());
@@ -328,6 +365,33 @@ export default function ScannerCattura() {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (videoRef.current as any).srcObject = null;
     }
+  };
+
+  /** Simula attesa backend (setTimeout) prima di mostrare il placeholder 3D */
+  const beginMeshVisualization = () => {
+    if (meshGenTimeoutRef.current) {
+      clearTimeout(meshGenTimeoutRef.current);
+      meshGenTimeoutRef.current = null;
+    }
+    setMeshPreviewUrl(null);
+    stopStream();
+    setCameraState("visualizing");
+    setScanMeshViewerStatus("processing");
+    meshGenTimeoutRef.current = setTimeout(() => {
+      meshGenTimeoutRef.current = null;
+      setMeshPreviewUrl("/path/to/mock.stl");
+      setScanMeshViewerStatus("ready");
+    }, 4000);
+  };
+
+  const leaveMeshVisualization = () => {
+    if (meshGenTimeoutRef.current) {
+      clearTimeout(meshGenTimeoutRef.current);
+      meshGenTimeoutRef.current = null;
+    }
+    setScanMeshViewerStatus("idle");
+    setMeshPreviewUrl(null);
+    setCameraState("review");
   };
 
   const cleanupPhotos = () => {
@@ -472,6 +536,7 @@ export default function ScannerCattura() {
   };
 
   const startCamera = async () => {
+    cancelBurstSequence();
     setError("");
     setCameraState("starting");
     setCurrentFoot("LEFT");
@@ -509,6 +574,7 @@ export default function ScannerCattura() {
   };
 
   const resumeToRightFoot = async () => {
+    cancelBurstSequence();
     setError("");
     setCameraState("starting");
     setCurrentFoot("RIGHT");
@@ -533,57 +599,105 @@ export default function ScannerCattura() {
     }
   };
 
-  const startPhaseCapture = () => {
+  /**
+   * Countdown 3→2→1, poi burst 8 frame con lampi/vibrazione leggeri (non ripetitivo),
+   * overlay “Acquisizione completata” + checkmark, poi `capturedInPhase = 8`.
+   */
+  const beginPhaseBurstSequence = () => {
     if (!videoRef.current) return;
     if (!phaseGuideAccepted) return;
-    if (cameraState === "capturingPhase") return;
-    if (capturePhaseLockRef.current) return;
+    if (burstInFlightRef.current) return;
+    if (cameraState !== "readyPhase") return;
+
+    burstCancelledRef.current = false;
+    burstInFlightRef.current = true;
     capturePhaseLockRef.current = true;
     autoStartedPhaseRef.current = phaseIndex;
 
     setError("");
-    setCapturedInPhase(0);
     setCameraState("capturingPhase");
 
-    captureTimerRef.current = window.setInterval(async () => {
-      if (captureInFlightRef.current) return;
-      captureInFlightRef.current = true;
+    const pid = phaseIndexRef.current;
 
+    void (async () => {
       try {
-        if (navigator.vibrate) navigator.vibrate(25);
+        for (let n = 3; n >= 1; n--) {
+          if (burstCancelledRef.current) return;
+          setBurstCountdown(n);
+          await sleep(1000);
+        }
+        if (burstCancelledRef.current) return;
+        setBurstCountdown(null);
+
+        const batch: Photo[] = [];
+        const foot = currentFootRef.current;
+        const video = videoRef.current;
+        if (!video) return;
+
+        setBurstMidCapture(true);
+        for (let i = 0; i < PHOTOS_PER_PHASE; i++) {
+          if (burstCancelledRef.current) return;
+          setBurstMicroNonce((n) => n + 1);
+          if (navigator.vibrate) navigator.vibrate(6);
+
+          const blob = await captureFrameAsJpeg(video);
+          if (!blob) continue;
+          batch.push({
+            blob,
+            url: URL.createObjectURL(blob),
+            phaseId: pid,
+          });
+          if (i < PHOTOS_PER_PHASE - 1) await sleep(BURST_FRAME_GAP_MS);
+        }
+        setBurstMidCapture(false);
+
+        if (burstCancelledRef.current) return;
+
+        if (batch.length < PHOTOS_PER_PHASE) {
+          setError("Acquisizione incompleta. Riprova.");
+          setCameraState("readyPhase");
+          return;
+        }
+
+        const append = (prev: Photo[]) => {
+          if (prev.length + batch.length > TOTAL_PHOTOS) return prev;
+          return [...prev, ...batch];
+        };
+        if (foot === "LEFT") setPhotosLeft(append);
+        else setPhotosRight(append);
+
+        setShowAcquisitionComplete(true);
         setFlashNonce((n) => n + 1);
+        if (navigator.vibrate) navigator.vibrate([10, 45, 15]);
         await playClick(audioCtxRef);
 
-        const blob = await captureFrameAsJpeg(videoRef.current!);
-        if (!blob) return;
-
-        const foot = currentFootRef.current;
-        const next = (prev: Photo[]) => {
-          if (prev.length >= TOTAL_PHOTOS) return prev;
-          const url = URL.createObjectURL(blob);
-          return [...prev, { blob, url }];
-        };
-        if (foot === "LEFT") setPhotosLeft(next);
-        else setPhotosRight(next);
-
-        setCapturedInPhase((n) => n + 1);
+        await sleep(1350);
+        if (burstCancelledRef.current) return;
+        setCapturedInPhase(PHOTOS_PER_PHASE);
       } catch {
-        // ignore capture errors
+        if (!burstCancelledRef.current) {
+          setError("Errore durante l'acquisizione. Riprova.");
+          setCameraState("readyPhase");
+        }
       } finally {
-        captureInFlightRef.current = false;
+        burstInFlightRef.current = false;
+        setBurstCountdown(null);
+        setBurstMidCapture(false);
+        setShowAcquisitionComplete(false);
       }
-    }, CAPTURE_EVERY_MS);
+    })();
   };
 
-  startPhaseCaptureRef.current = startPhaseCapture;
+  startBurstSequenceRef.current = beginPhaseBurstSequence;
 
   useEffect(() => {
     if (cameraState !== "readyPhase") return;
     if (!phaseGuideAccepted) return;
-    if (alignment.stableAlignedMs < 1000) return;
+    if (alignment.stableAlignedMs < STABLE_ALIGNMENT_MS) return;
     if (autoStartedPhaseRef.current === phaseIndex) return;
     if (!videoRef.current) return;
-    startPhaseCaptureRef.current();
+    if (burstInFlightRef.current) return;
+    startBurstSequenceRef.current();
   }, [cameraState, alignment.stableAlignedMs, phaseIndex, phaseGuideAccepted]);
 
   // stop phase when reached 8
@@ -631,6 +745,12 @@ export default function ScannerCattura() {
     setBiometryResult(null);
     setBiometryBusy(false);
     setAcceptTerms(false);
+    if (meshGenTimeoutRef.current) {
+      clearTimeout(meshGenTimeoutRef.current);
+      meshGenTimeoutRef.current = null;
+    }
+    setScanMeshViewerStatus("idle");
+    setMeshPreviewUrl(null);
     setCameraState("idle");
   };
 
@@ -793,6 +913,18 @@ export default function ScannerCattura() {
         <div key={flashNonce} className="flash-border pointer-events-none" />
       )}
 
+      {/* Lampo rapido per ogni frame del burst (leggero, non “8 scatti” espliciti) */}
+      {cameraState === "capturingPhase" && burstMidCapture && (
+        <div key={burstMicroNonce} className="burst-micro-flash pointer-events-none absolute inset-0 z-[82]" />
+      )}
+      {/* Pulse sottile sul frame durante il burst */}
+      {cameraState === "capturingPhase" && burstMidCapture && (
+        <div
+          className="pointer-events-none absolute inset-0 z-[13] animate-pulse bg-sky-400/[0.06]"
+          aria-hidden
+        />
+      )}
+
       {/* Pannello illustrativo prima di ogni fase (cliente + operatore) */}
       {cameraState === "readyPhase" && !phaseGuideAccepted ? (
         <ScannerPhaseGuidePanel
@@ -846,12 +978,12 @@ export default function ScannerCattura() {
         transition={{ duration: 0.06, ease: "easeOut" }}
         className="absolute inset-0 z-50"
       >
-        {/* Angoli: info compatte (FOTO ACQUISITE in alto a sinistra, piccolo) */}
+        {/* Angoli: nessun conteggio foto in sessione (percezione “un colpo” per fase) */}
         <div className="pointer-events-none absolute left-0 top-0 z-[85] flex max-w-[min(85vw,280px)] flex-col gap-1.5 px-3 pt-[max(0.5rem,env(safe-area-inset-top))]">
           <div className={`${techBadgeClass} py-1.5 text-[9px]`}>UNIT: SCANNER_V1</div>
           {(cameraState === "capturingPhase" || cameraState === "readyPhase") && (
-            <div className="font-mono text-[10px] font-bold uppercase leading-tight tracking-[0.08em] text-zinc-300">
-              {formatCounter(activePhotosCount, TOTAL_PHOTOS)}
+            <div className="font-mono text-[10px] font-bold uppercase leading-tight tracking-[0.08em] text-zinc-400">
+              {cameraState === "capturingPhase" ? "Acquisizione attiva" : "Pronto"}
             </div>
           )}
           {(cameraState === "capturingPhase" || cameraState === "readyPhase") && (
@@ -893,7 +1025,46 @@ export default function ScannerCattura() {
           </div>
         )}
 
-        {(cameraState === "readyPhase" || cameraState === "capturingPhase") && phaseGuideAccepted && (
+        {/* Countdown unico per fase (3→2→1) prima del burst nascosto */}
+        {cameraState === "capturingPhase" && burstCountdown != null && (
+          <div className="pointer-events-none absolute inset-0 z-[88] flex items-center justify-center bg-black/30">
+            <div className="font-sans text-[min(28vw,120px)] font-black tabular-nums leading-none text-white drop-shadow-[0_6px_32px_rgba(0,0,0,0.85)]">
+              {burstCountdown}
+            </div>
+          </div>
+        )}
+
+        {/* Check + messaggio dopo il burst (prima del passaggio di fase) */}
+        <AnimatePresence>
+          {showAcquisitionComplete && cameraState === "capturingPhase" && (
+            <motion.div
+              key="acquisition-complete"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.18 }}
+              className="pointer-events-none absolute inset-0 z-[91] flex flex-col items-center justify-center bg-black/40 backdrop-blur-[1px]"
+            >
+              <motion.div
+                initial={{ scale: 0.62, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                transition={{ type: "spring", stiffness: 440, damping: 26 }}
+                className="flex flex-col items-center gap-4 px-6"
+              >
+                <div className="flex h-[72px] w-[72px] items-center justify-center rounded-full border-2 border-emerald-400/80 bg-emerald-500/15 shadow-[0_0_52px_rgba(52,211,153,0.32)]">
+                  <Check className="h-10 w-10 text-emerald-200" strokeWidth={2.75} aria-hidden />
+                </div>
+                <p className="max-w-[min(90vw,320px)] text-center text-lg font-semibold tracking-tight text-white drop-shadow-lg">
+                  Acquisizione completata
+                </p>
+              </motion.div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {(cameraState === "readyPhase" || cameraState === "capturingPhase") &&
+          phaseGuideAccepted &&
+          !(cameraState === "capturingPhase" && showAcquisitionComplete) && (
           <div className="pointer-events-none absolute bottom-[7.5rem] left-1/2 z-[58] w-[min(96vw,560px)] max-w-[100vw] -translate-x-1/2 px-3 sm:bottom-[8.25rem]">
             <p
               className={cn(
@@ -902,7 +1073,9 @@ export default function ScannerCattura() {
               )}
             >
               {cameraState === "capturingPhase"
-                ? "Acquisizione in corso… mantieni il telefono stabile."
+                ? burstCountdown != null
+                  ? "Resta fermo: acquisizione tra pochi secondi…"
+                  : "Acquisizione in corso… mantieni il telefono stabile."
                 : phase.instruction}
             </p>
           </div>
@@ -925,7 +1098,7 @@ export default function ScannerCattura() {
                 </div>
                 <div className="mt-3 font-sans text-lg text-zinc-400">
                   Due piedi nello stesso ordine: prima <strong className="text-zinc-100">sinistro</strong>, poi{" "}
-                  <strong className="text-zinc-200">destro</strong> (32 + 32 foto).
+                  <strong className="text-zinc-200">destro</strong> (stesse fasi per entrambi).
                 </div>
 
                 <div className="mt-5 w-full max-w-md space-y-3 text-left">
@@ -1053,16 +1226,15 @@ export default function ScannerCattura() {
               </div>
               <div className="mt-3 flex items-center justify-center gap-4 font-mono text-[10px] tracking-wide text-zinc-400">
                 <span>
-                  Set: {capturedInPhase}/{PHOTOS_PER_PHASE}
+                  Fase {phaseIndex + 1} / 4 · {currentFoot === "LEFT" ? "piede SX" : "piede DX"}
                 </span>
-                <span className="text-sky-400/90">{phaseIndex + 1}/4</span>
               </div>
               <div className="mt-4 flex flex-col items-center gap-3">
                 <div className="flex items-center justify-center gap-2">
                   {progressTacks.map((filled, i) => (
                     <div
                       key={i}
-                      className={`h-1.5 w-4 rounded-sm border ${
+                      className={`h-2 w-8 rounded-sm border ${
                         filled
                           ? "border-sky-500 bg-sky-500 shadow-[0_0_12px_rgba(56,189,248,0.5)]"
                           : "border-zinc-600/80 bg-black/30"
@@ -1071,13 +1243,21 @@ export default function ScannerCattura() {
                   ))}
                 </div>
                 <ScannerShutterButton
-                  progress={activePhotosCount / TOTAL_PHOTOS}
-                  onClick={cameraState === "readyPhase" && phaseGuideAccepted ? startPhaseCapture : undefined}
+                  progress={phaseIndex / 4}
+                  onClick={
+                    cameraState === "readyPhase" && phaseGuideAccepted ? beginPhaseBurstSequence : undefined
+                  }
                   disabled={cameraState === "capturingPhase"}
                   capturing={cameraState === "capturingPhase"}
                   label={
                     cameraState === "capturingPhase"
-                      ? `${activePhotosCount} / ${TOTAL_PHOTOS} foto`
+                      ? showAcquisitionComplete
+                        ? "Fatto"
+                        : burstCountdown != null
+                          ? "Tra poco…"
+                          : burstMidCapture
+                            ? "In corso…"
+                            : "Acquisizione…"
                       : `Tocca · avvia fase ${phaseIndex + 1}`
                   }
                 />
@@ -1094,7 +1274,7 @@ export default function ScannerCattura() {
                 PAIO PRONTO (SX + DX)
               </div>
               <div className="font-mono text-[10px] tracking-[0.14em] text-zinc-400">
-                {photosLeft.length} SX · {photosRight.length} DX · {formatCounter(totalCaptured, TOTAL_PHOTOS * 2)}
+                Galleria sessione
               </div>
             </div>
 
@@ -1135,7 +1315,7 @@ export default function ScannerCattura() {
             <div className="mx-4 mt-6 flex flex-col gap-3 pb-10">
               {!pairComplete ? (
                 <p className="text-center text-xs text-amber-200/90">
-                  Completa entrambe le acquisizioni (32 + 32 foto) per inviare il paio.
+                  Completa entrambe le acquisizioni per inviare il paio.
                 </p>
               ) : null}
               <Button
@@ -1184,10 +1364,7 @@ export default function ScannerCattura() {
             progress={processingProgress}
             isReady={processingReady}
             scanId={processingScanId}
-            onVisualize={() => {
-              stopStream();
-              setCameraState("visualizing");
-            }}
+            onVisualize={beginMeshVisualization}
             onBackToGallery={() => setCameraState("review")}
           />
         )}
@@ -1196,12 +1373,49 @@ export default function ScannerCattura() {
         {cameraState === "visualizing" && (
           <div className="absolute inset-0 z-80 flex items-center justify-center bg-zinc-950 px-4">
             <div className="w-full max-w-xl">
-              <FootCanvas metrics={DEFAULT_METRICS} />
+              {(() => {
+                switch (scanMeshViewerStatus) {
+                  case "idle":
+                  case "completing":
+                    return (
+                      <div className="flex min-h-[200px] flex-col items-center justify-center gap-4 rounded-xl border border-zinc-800 bg-zinc-900/50 p-8 text-center text-zinc-300">
+                        <Loader2 className="h-10 w-10 animate-spin text-blue-500" aria-hidden />
+                        <div className="text-sm">
+                          Preparazione visualizzazione 3D…
+                        </div>
+                      </div>
+                    );
+                  case "processing":
+                    return (
+                      <div className="flex min-h-[200px] flex-col items-center justify-center gap-4 rounded-xl border border-zinc-800 bg-zinc-900/50 p-8 text-center">
+                        <Loader2 className="h-10 w-10 animate-spin text-blue-500" aria-hidden />
+                        <div className="text-sm text-zinc-200">
+                          Generazione del modello 3D in corso… Attendi qualche istante.
+                        </div>
+                      </div>
+                    );
+                  case "ready":
+                    return (
+                      <FootCanvas
+                        metrics={DEFAULT_METRICS}
+                        meshUrl={meshPreviewUrl ?? undefined}
+                      />
+                    );
+                  case "error":
+                    return (
+                      <div className="rounded-xl border border-red-500/30 bg-red-950/30 p-6 text-center text-sm text-red-100">
+                        Si è verificato un errore nella generazione del modello 3D. Riprova.
+                      </div>
+                    );
+                  default:
+                    return null;
+                }
+              })()}
               <div className="mt-4">
                 <Button
                   type="button"
                   variant="outline"
-                  onClick={() => setCameraState("review")}
+                  onClick={leaveMeshVisualization}
                   className="h-auto w-full rounded-xl border-zinc-800 bg-zinc-900/50 px-6 py-4 font-mono text-sm tracking-[0.12em] text-zinc-100 backdrop-blur-md hover:bg-zinc-800 hover:text-zinc-100"
                 >
                   TORNA ALLA GALLERY
