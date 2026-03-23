@@ -8,6 +8,7 @@ import { Readable } from "node:stream";
 import { google } from "googleapis";
 
 const SCOPES = ["https://www.googleapis.com/auth/drive"];
+const DRIVE_REQUEST_TIMEOUT_MS = 25_000;
 
 let cachedDrive: ReturnType<typeof google.drive> | null = null;
 let cachedAuth: google.auth.GoogleAuth | null = null;
@@ -20,6 +21,18 @@ function getDriveClient() {
   });
   cachedDrive = google.drive({ version: "v3", auth: cachedAuth });
   return cachedDrive;
+}
+
+async function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`${label} timeout after ${ms}ms`)), ms);
+    });
+    return (await Promise.race([promise, timeoutPromise])) as T;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 function getCredentials(): Record<string, unknown> {
@@ -40,14 +53,24 @@ export function isDriveConfigured(): boolean {
 export async function createDriveSubfolder(parentFolderId: string, name: string): Promise<{ id: string }> {
   const drive = getDriveClient();
   const safeName = name.replace(/[/\\?%*:|"<>]/g, "-").slice(0, 200);
-  const res = await drive.files.create({
-    requestBody: {
-      name: safeName,
-      mimeType: "application/vnd.google-apps.folder",
-      parents: [parentFolderId],
-    },
-    fields: "id",
-  });
+  const res = await withTimeout(
+    drive.files.create(
+      {
+        requestBody: {
+          name: safeName,
+          mimeType: "application/vnd.google-apps.folder",
+          parents: [parentFolderId],
+        },
+        fields: "id",
+      },
+      {
+        timeout: DRIVE_REQUEST_TIMEOUT_MS,
+        retry: false,
+      }
+    ),
+    DRIVE_REQUEST_TIMEOUT_MS + 2_000,
+    "drive.files.create(folder)"
+  );
   const id = res.data.id;
   if (!id) throw new Error("Drive: cartella non creata");
   return { id };
@@ -62,17 +85,27 @@ export async function uploadBufferToDrive(params: {
   const drive = getDriveClient();
   const safeName = params.fileName.replace(/[/\\?%*:|"<>]/g, "-").slice(0, 200);
 
-  const res = await drive.files.create({
-    requestBody: {
-      name: safeName,
-      parents: [params.parentFolderId],
-    },
-    media: {
-      mimeType: params.mimeType,
-      body: Readable.from(params.buffer),
-    },
-    fields: "id",
-  });
+  const res = await withTimeout(
+    drive.files.create(
+      {
+        requestBody: {
+          name: safeName,
+          parents: [params.parentFolderId],
+        },
+        media: {
+          mimeType: params.mimeType,
+          body: Readable.from(params.buffer),
+        },
+        fields: "id",
+      },
+      {
+        timeout: DRIVE_REQUEST_TIMEOUT_MS,
+        retry: false,
+      }
+    ),
+    DRIVE_REQUEST_TIMEOUT_MS + 2_000,
+    `drive.files.create(file:${safeName})`
+  );
 
   return { id: res.data.id ?? "", webViewLink: undefined };
 }

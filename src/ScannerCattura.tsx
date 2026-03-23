@@ -881,6 +881,8 @@ export default function ScannerCattura() {
           if (!slice.length) continue;
           const data = await postBatch(slice, b, batchCount);
           lastJson = data;
+          const uploadPct = Math.round(((b + 1) / batchCount) * 100);
+          setProcessingProgress(uploadPct);
 
           const st = data.status;
           if (typeof data.driveFolderId === "string" && data.driveFolderId) {
