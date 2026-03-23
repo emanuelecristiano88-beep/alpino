@@ -40,6 +40,8 @@ const STABLE_ALIGNMENT_MS = 800;
 const BURST_FRAME_GAP_MS = 90;
 const PHOTOS_PER_PHASE = 8;
 const TOTAL_PHOTOS = PHOTOS_PER_PHASE * 4;
+/** Upload cloud: sottoinsieme per fase per ridurre timeout serverless (es. 3 x 4 x 2 piedi = 24 foto). */
+const UPLOAD_PHOTOS_PER_PHASE = 3;
 /** Vercel: body funzione ~4.5MB — più batch evitano FUNCTION_INVOCATION_FAILED */
 const UPLOAD_BATCH_SIZE = 1;
 /** Manteniamo ogni body sotto ~0.55–0.65MB per margine su Vercel serverless. */
@@ -160,6 +162,24 @@ function buildUploadBatches<T extends { blob: Blob }>(
 
   if (current.length > 0) out.push(current);
   return out;
+}
+
+function selectRepresentativePhaseFrames<T>(frames: T[], perPhase: number): T[] {
+  if (perPhase >= PHOTOS_PER_PHASE) return frames.slice();
+  const picks = [1, 4, 7]; // inizio/medio/fine del burst fase
+  const maxPerPhase = Math.max(1, Math.min(perPhase, picks.length));
+  const selected: T[] = [];
+  const phaseCount = Math.floor(frames.length / PHOTOS_PER_PHASE);
+  for (let p = 0; p < phaseCount; p++) {
+    const base = p * PHOTOS_PER_PHASE;
+    for (let i = 0; i < maxPerPhase; i++) {
+      const idx = base + picks[i];
+      if (idx >= base && idx < base + PHOTOS_PER_PHASE && idx < frames.length) {
+        selected.push(frames[idx]);
+      }
+    }
+  }
+  return selected;
 }
 
 function sleep(ms: number) {
@@ -822,12 +842,15 @@ export default function ScannerCattura() {
       const secret = import.meta.env.VITE_UPLOAD_API_SECRET as string | undefined;
       if (secret) uploadHeaders.set("x-upload-secret", secret);
 
+      const uploadLeft = selectRepresentativePhaseFrames(photosLeft, UPLOAD_PHOTOS_PER_PHASE);
+      const uploadRight = selectRepresentativePhaseFrames(photosRight, UPLOAD_PHOTOS_PER_PHASE);
+
       const items: { blob: Blob; name: string }[] = [
-        ...photosLeft.map((p, idx) => ({
+        ...uploadLeft.map((p, idx) => ({
           blob: p.blob,
           name: `left_${String(idx).padStart(2, "0")}.webp`,
         })),
-        ...photosRight.map((p, idx) => ({
+        ...uploadRight.map((p, idx) => ({
           blob: p.blob,
           name: `right_${String(idx).padStart(2, "0")}.webp`,
         })),

@@ -8,7 +8,7 @@ import { Readable } from "node:stream";
 import { google } from "googleapis";
 
 const SCOPES = ["https://www.googleapis.com/auth/drive"];
-const DRIVE_REQUEST_TIMEOUT_MS = 25_000;
+const DRIVE_REQUEST_TIMEOUT_MS = 8_000;
 
 let cachedDrive: ReturnType<typeof google.drive> | null = null;
 let cachedAuth: google.auth.GoogleAuth | null = null;
