@@ -42,10 +42,6 @@ const PHOTOS_PER_PHASE = 8;
 const TOTAL_PHOTOS = PHOTOS_PER_PHASE * 4;
 /** Upload cloud: sottoinsieme per fase per ridurre timeout serverless (es. 3 x 4 x 2 piedi = 24 foto). */
 const UPLOAD_PHOTOS_PER_PHASE = 3;
-/** Vercel: body funzione ~4.5MB — più batch evitano FUNCTION_INVOCATION_FAILED */
-const UPLOAD_BATCH_SIZE = 1;
-/** Manteniamo ogni body sotto ~0.55–0.65MB per margine su Vercel serverless. */
-const UPLOAD_BATCH_MAX_BYTES = 600_000;
 const MAX_OUTPUT_DIM = 640; // downscale aggressively to survive Vercel payload limits
 const JPEG_QUALITY = 0.56; // used for both JPEG and WebP quality
 const DEFAULT_METRICS: Metrics = { footLengthMm: 265, forefootWidthMm: 95 };
@@ -136,32 +132,6 @@ async function captureFrameAsJpeg(video: HTMLVideoElement) {
   // Retry only if too large: stricter encode to survive Vercel payload limits.
   const second = await renderOnce(Math.max(480, Math.floor(MAX_OUTPUT_DIM * 0.82)), Math.min(0.5, JPEG_QUALITY * 0.75));
   return second;
-}
-
-function buildUploadBatches<T extends { blob: Blob }>(
-  items: T[],
-  maxFilesPerBatch: number,
-  maxBytesPerBatch: number
-): T[][] {
-  const out: T[][] = [];
-  let current: T[] = [];
-  let bytes = 0;
-
-  for (const item of items) {
-    const size = Math.max(0, item.blob.size || 0);
-    const wouldOverflowBytes = current.length > 0 && bytes + size > maxBytesPerBatch;
-    const wouldOverflowCount = current.length >= maxFilesPerBatch;
-    if (wouldOverflowBytes || wouldOverflowCount) {
-      out.push(current);
-      current = [];
-      bytes = 0;
-    }
-    current.push(item);
-    bytes += size;
-  }
-
-  if (current.length > 0) out.push(current);
-  return out;
 }
 
 function selectRepresentativePhaseFrames<T>(frames: T[], perPhase: number): T[] {
@@ -861,135 +831,72 @@ export default function ScannerCattura() {
         (typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `scan_${Date.now()}`);
       if (!scanId) setScanId(sessionScanId);
 
-      const runUploadPass = async (batchSize: number, batchMaxBytes: number) => {
-        const batches = buildUploadBatches(items, batchSize, batchMaxBytes);
-        const batchCount = Math.max(1, batches.length);
-        let driveFolderIdFromServer: string | undefined;
-        let lastJson: Record<string, unknown> | null = null;
+      let driveFolderId: string | undefined;
+      let driveFolderLink: string | undefined;
 
-        const postBatch = async (slice: { blob: Blob; name: string }[], b: number, total: number) => {
-          const form = new FormData();
-          slice.forEach((item) => {
-            form.append("photos", item.blob, item.name);
-          });
-          form.append("count", String(items.length));
-          form.append("pair", "true");
-          form.append("scanId", sessionScanId);
-          if (total > 1) {
-            form.append("batchIndex", String(b));
-            form.append("batchTotal", String(total));
-            if (driveFolderIdFromServer) {
-              form.append("driveFolderId", driveFolderIdFromServer);
-            }
-          }
+      for (let i = 0; i < items.length; i++) {
+        const item = items[i];
+        const form = new FormData();
+        form.append("photo", item.blob, item.name);
+        form.append("scanId", sessionScanId);
+        form.append("fileName", item.name);
+        if (driveFolderId) form.append("driveFolderId", driveFolderId);
 
-          const res = await fetch("/api/process-scan", {
-            method: "POST",
-            body: form,
-            headers: uploadHeaders,
-          });
-          const text = await res.text().catch(() => "");
-          if (!res.ok) {
-            throw new Error(`POST fallito (${res.status}). ${text}`);
-          }
-          try {
-            return JSON.parse(text) as Record<string, unknown>;
-          } catch {
-            throw new Error("Risposta API non valida (JSON)");
-          }
-        };
-
-        for (let b = 0; b < batchCount; b++) {
-          const slice = batches[b] ?? [];
-          if (!slice.length) continue;
-          const data = await postBatch(slice, b, batchCount);
-          lastJson = data;
-          const uploadPct = Math.round(((b + 1) / batchCount) * 100);
-          setProcessingProgress(uploadPct);
-
-          const st = data.status;
-          if (typeof data.driveFolderId === "string" && data.driveFolderId) {
-            driveFolderIdFromServer = data.driveFolderId;
-          }
-          if (st === "partial") continue;
-          if (st === "success") break;
-          throw new Error(typeof data.message === "string" ? data.message : "Risposta API non valida");
+        const res = await fetch("/api/upload-single", {
+          method: "POST",
+          body: form,
+          headers: uploadHeaders,
+        });
+        const text = await res.text().catch(() => "");
+        if (!res.ok) {
+          throw new Error(`upload-single fallito (${res.status}) foto ${i + 1}/${items.length}. ${text}`);
         }
-        return lastJson;
-      };
+        let data: Record<string, unknown>;
+        try {
+          data = JSON.parse(text) as Record<string, unknown>;
+        } catch {
+          throw new Error(`Risposta upload-single non valida (foto ${i + 1}/${items.length})`);
+        }
+        if (data.ok !== true || data.driveUploaded !== true) {
+          throw new Error(
+            typeof data.error === "string"
+              ? `upload-single errore foto ${i + 1}/${items.length}: ${data.error}`
+              : `upload-single non ha caricato la foto ${i + 1}/${items.length}`
+          );
+        }
+        if (typeof data.driveFolderId === "string" && data.driveFolderId) {
+          driveFolderId = data.driveFolderId;
+        }
+        if (typeof data.driveFolderLink === "string" && data.driveFolderLink) {
+          driveFolderLink = data.driveFolderLink;
+        }
 
-      let data: Record<string, unknown> | null = null;
-      try {
-        data = await runUploadPass(UPLOAD_BATCH_SIZE, UPLOAD_BATCH_MAX_BYTES);
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        const isServerCrash = /\(5\d\d\)/.test(msg) || /FUNCTION_INVOCATION_FAILED/i.test(msg);
-        if (!isServerCrash) throw err;
-        // Fallback ultra-safe su Vercel: 1 immagine per request, payload minimo.
-        data = await runUploadPass(1, 550_000);
-      }
-
-      if (!data || data.status !== "success") {
-        throw new Error(
-          typeof data?.message === "string" ? data.message : "Upload incompleto: nessuna risposta success finale."
-        );
-      }
-
-      const serverScanId = data?.scanId ? String(data.scanId) : sessionScanId || "OK";
-      const serverPath = typeof data?.path === "string" ? data.path : "";
-      const driveUploaded = data?.driveUploaded === true;
-      const driveFolderLink = typeof data?.driveFolderLink === "string" ? data.driveFolderLink : "";
-      const driveNote = typeof data?.scaleReferenceNote === "string" ? data.scaleReferenceNote : "";
-
-      // Strict cloud requirement: non proseguire se Drive non ha salvato davvero i file.
-      if (!driveUploaded) {
-        const hint = driveNote ? ` (${driveNote})` : "";
-        throw new Error(`Upload completato ma Drive non ha salvato i file${hint}.`);
+        const uploadPct = Math.round(((i + 1) / items.length) * 100);
+        setProcessingProgress(uploadPct);
       }
 
       // allinea i badge tecnici all'ID server
-      setScanId(serverScanId);
-      setProcessingScanId(serverScanId);
-      setScanPath(driveFolderLink || serverPath);
+      setScanId(sessionScanId);
+      setProcessingScanId(sessionScanId);
+      setScanPath(driveFolderLink || "/scans/drive");
       setError("");
 
       if (typeof sessionStorage !== "undefined") {
         sessionStorage.setItem(PAIR_STORAGE_KEY, "true");
-        const m = data?.metrics;
-        if (m && typeof m === "object") {
-          sessionStorage.setItem(
-            SCAN_METRICS_STORAGE_KEY,
-            JSON.stringify({
-              ...m,
-              updatedAt: new Date().toISOString(),
-            })
-          );
-        }
+        sessionStorage.setItem(
+          SCAN_METRICS_STORAGE_KEY,
+          JSON.stringify({
+            lunghezzaMm: DEFAULT_METRICS.footLengthMm,
+            larghezzaMm: DEFAULT_METRICS.forefootWidthMm,
+            updatedAt: new Date().toISOString(),
+          })
+        );
       }
 
       // simulazione elaborazione di 3 secondi (poi abilita "VISUALIZZA 3D")
       startProcessingSimulation();
     } catch (e: any) {
       const msg = e?.message || String(e);
-      const isServerInvocationFailure =
-        /FUNCTION_INVOCATION_FAILED/i.test(msg) || /POST fallito \(5\d\d\)/i.test(msg);
-
-      // Modalità strict cloud: se il cloud upload è giù, fermiamo il flusso.
-      // (Le foto su Drive sono requisito operativo.)
-      const allowLocalFallback = false;
-      if (isServerInvocationFailure && allowLocalFallback) {
-        const fallbackScanId =
-          scanId ||
-          (typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `scan_local_${Date.now()}`);
-        setScanId(fallbackScanId);
-        setProcessingScanId(fallbackScanId);
-        setScanPath("/scans/local-fallback");
-        setError("Upload cloud non disponibile: continuo in modalità locale.");
-        setCameraState("uploading");
-        startProcessingSimulation();
-        return;
-      }
-
       stopProcessing();
       setCameraState("review");
       setError(`ERRORE_UPLOAD // ${msg}`);
