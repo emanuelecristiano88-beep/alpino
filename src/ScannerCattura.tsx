@@ -41,11 +41,11 @@ const BURST_FRAME_GAP_MS = 90;
 const PHOTOS_PER_PHASE = 8;
 const TOTAL_PHOTOS = PHOTOS_PER_PHASE * 4;
 /** Vercel: body funzione ~4.5MB — più batch evitano FUNCTION_INVOCATION_FAILED */
-const UPLOAD_BATCH_SIZE = 4;
-/** Manteniamo ogni body sotto ~2.8MB per margine su Vercel serverless. */
-const UPLOAD_BATCH_MAX_BYTES = 2_800_000;
-const MAX_OUTPUT_DIM = 1024; // downscale to reduce memory/traffic
-const JPEG_QUALITY = 0.82;
+const UPLOAD_BATCH_SIZE = 2;
+/** Manteniamo ogni body sotto ~1.2MB per margine su Vercel serverless. */
+const UPLOAD_BATCH_MAX_BYTES = 1_200_000;
+const MAX_OUTPUT_DIM = 800; // downscale to reduce memory/traffic
+const JPEG_QUALITY = 0.68;
 const DEFAULT_METRICS: Metrics = { footLengthMm: 265, forefootWidthMm: 95 };
 
 const PHASES = SCAN_CAPTURE_PHASES;
@@ -121,7 +121,8 @@ async function captureFrameAsJpeg(video: HTMLVideoElement) {
   ctx.drawImage(video, 0, 0, cW, cH);
 
   const blob = await new Promise<Blob | null>((resolve) => {
-    canvas.toBlob((b) => resolve(b), "image/jpeg", JPEG_QUALITY);
+    // WebP riduce drasticamente payload rispetto a JPEG (utile con limiti body Vercel).
+    canvas.toBlob((b) => resolve(b), "image/webp", JPEG_QUALITY);
   });
 
   return blob;
@@ -801,11 +802,11 @@ export default function ScannerCattura() {
       const items: { blob: Blob; name: string }[] = [
         ...photosLeft.map((p, idx) => ({
           blob: p.blob,
-          name: `left_${String(idx).padStart(2, "0")}.jpg`,
+          name: `left_${String(idx).padStart(2, "0")}.webp`,
         })),
         ...photosRight.map((p, idx) => ({
           blob: p.blob,
-          name: `right_${String(idx).padStart(2, "0")}.jpg`,
+          name: `right_${String(idx).padStart(2, "0")}.webp`,
         })),
       ];
 
@@ -814,67 +815,72 @@ export default function ScannerCattura() {
         (typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `scan_${Date.now()}`);
       if (!scanId) setScanId(sessionScanId);
 
-      const batches = buildUploadBatches(items, UPLOAD_BATCH_SIZE, UPLOAD_BATCH_MAX_BYTES);
-      const batchCount = Math.max(1, batches.length);
-      const useBatched = batchCount > 1;
+      const runUploadPass = async (batchSize: number, batchMaxBytes: number) => {
+        const batches = buildUploadBatches(items, batchSize, batchMaxBytes);
+        const batchCount = Math.max(1, batches.length);
+        let driveFolderIdFromServer: string | undefined;
+        let lastJson: Record<string, unknown> | null = null;
 
-      let driveFolderIdFromServer: string | undefined;
-      let lastJson: Record<string, unknown> | null = null;
-
-      const postBatch = async (slice: { blob: Blob; name: string }[], b: number, total: number) => {
-        const form = new FormData();
-        slice.forEach((item) => {
-          form.append("photos", item.blob, item.name);
-        });
-        form.append("count", String(items.length));
-        form.append("pair", "true");
-        form.append("scanId", sessionScanId);
-        if (total > 1) {
-          form.append("batchIndex", String(b));
-          form.append("batchTotal", String(total));
-          if (driveFolderIdFromServer) {
-            form.append("driveFolderId", driveFolderIdFromServer);
+        const postBatch = async (slice: { blob: Blob; name: string }[], b: number, total: number) => {
+          const form = new FormData();
+          slice.forEach((item) => {
+            form.append("photos", item.blob, item.name);
+          });
+          form.append("count", String(items.length));
+          form.append("pair", "true");
+          form.append("scanId", sessionScanId);
+          if (total > 1) {
+            form.append("batchIndex", String(b));
+            form.append("batchTotal", String(total));
+            if (driveFolderIdFromServer) {
+              form.append("driveFolderId", driveFolderIdFromServer);
+            }
           }
-        }
 
-        const res = await fetch("/api/process-scan", {
-          method: "POST",
-          body: form,
-          headers: uploadHeaders,
-        });
-        const text = await res.text().catch(() => "");
-        if (!res.ok) {
-          throw new Error(`POST fallito (${res.status}). ${text}`);
+          const res = await fetch("/api/process-scan", {
+            method: "POST",
+            body: form,
+            headers: uploadHeaders,
+          });
+          const text = await res.text().catch(() => "");
+          if (!res.ok) {
+            throw new Error(`POST fallito (${res.status}). ${text}`);
+          }
+          try {
+            return JSON.parse(text) as Record<string, unknown>;
+          } catch {
+            throw new Error("Risposta API non valida (JSON)");
+          }
+        };
+
+        for (let b = 0; b < batchCount; b++) {
+          const slice = batches[b] ?? [];
+          if (!slice.length) continue;
+          const data = await postBatch(slice, b, batchCount);
+          lastJson = data;
+
+          const st = data.status;
+          if (typeof data.driveFolderId === "string" && data.driveFolderId) {
+            driveFolderIdFromServer = data.driveFolderId;
+          }
+          if (st === "partial") continue;
+          if (st === "success") break;
+          throw new Error(typeof data.message === "string" ? data.message : "Risposta API non valida");
         }
-        try {
-          return JSON.parse(text) as Record<string, unknown>;
-        } catch {
-          throw new Error("Risposta API non valida (JSON)");
-        }
+        return lastJson;
       };
 
-      for (let b = 0; b < batchCount; b++) {
-        const slice = batches[b] ?? [];
-        if (!slice.length) continue;
-        const data = await postBatch(slice, b, batchCount);
-
-        lastJson = data;
-
-        const st = data.status;
-        if (typeof data.driveFolderId === "string" && data.driveFolderId) {
-          driveFolderIdFromServer = data.driveFolderId;
-        }
-
-        if (st === "partial") {
-          continue;
-        }
-        if (st === "success") {
-          break;
-        }
-        throw new Error(typeof data.message === "string" ? data.message : "Risposta API non valida");
+      let data: Record<string, unknown> | null = null;
+      try {
+        data = await runUploadPass(UPLOAD_BATCH_SIZE, UPLOAD_BATCH_MAX_BYTES);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        const isServerCrash = /\(5\d\d\)/.test(msg) || /FUNCTION_INVOCATION_FAILED/i.test(msg);
+        if (!isServerCrash) throw err;
+        // Fallback ultra-safe su Vercel: 1 immagine per request, payload minimo.
+        data = await runUploadPass(1, 550_000);
       }
 
-      const data = lastJson;
       if (!data || data.status !== "success") {
         throw new Error(
           typeof data?.message === "string" ? data.message : "Upload incompleto: nessuna risposta success finale."
@@ -907,9 +913,28 @@ export default function ScannerCattura() {
       // simulazione elaborazione di 3 secondi (poi abilita "VISUALIZZA 3D")
       startProcessingSimulation();
     } catch (e: any) {
+      const msg = e?.message || String(e);
+      const isServerInvocationFailure =
+        /FUNCTION_INVOCATION_FAILED/i.test(msg) || /POST fallito \(5\d\d\)/i.test(msg);
+
+      // Fallback UX: se il cloud upload è giù, non bloccare il flusso utente.
+      // Continuiamo con simulazione processing locale e preview 3D.
+      if (isServerInvocationFailure) {
+        const fallbackScanId =
+          scanId ||
+          (typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `scan_local_${Date.now()}`);
+        setScanId(fallbackScanId);
+        setProcessingScanId(fallbackScanId);
+        setScanPath("/scans/local-fallback");
+        setError("Upload cloud non disponibile: continuo in modalità locale.");
+        setCameraState("uploading");
+        startProcessingSimulation();
+        return;
+      }
+
       stopProcessing();
       setCameraState("review");
-      setError(`ERRORE_UPLOAD // ${e?.message || String(e)}`);
+      setError(`ERRORE_UPLOAD // ${msg}`);
     }
   };
 

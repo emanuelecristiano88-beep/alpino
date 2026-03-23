@@ -135,7 +135,22 @@ export default async function handler(request: Request): Promise<Response> {
   }
 
   try {
-    const formData = await request.formData();
+    let formData: FormData;
+    try {
+      formData = await request.formData();
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      return Response.json(
+        {
+          status: "error",
+          message:
+            "Impossibile leggere il payload upload (troppo grande o parsing formData fallito).",
+          error: msg,
+          hint: "Riduci ancora dimensione foto e/o batch. Verifica che non stai superando i limiti Vercel del body.",
+        },
+        { status: 413 }
+      );
+    }
     const entries = formData.getAll("photos");
     if (!entries.length) {
       return Response.json(
