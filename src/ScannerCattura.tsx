@@ -713,8 +713,32 @@ export default function ScannerCattura() {
     const videoEl = videoRef.current;
     if (!videoEl) throw new Error("Video element assente.");
 
+    // Safari/iOS può avere stream attivo ma metadati non ancora pronti.
+    await new Promise<void>((resolve) => {
+      if (videoEl.readyState >= 1 && videoEl.videoWidth > 0) {
+        resolve();
+        return;
+      }
+      let done = false;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        videoEl.removeEventListener("loadedmetadata", finish);
+        videoEl.removeEventListener("canplay", finish);
+        resolve();
+      };
+      videoEl.addEventListener("loadedmetadata", finish, { once: true });
+      videoEl.addEventListener("canplay", finish, { once: true });
+      window.setTimeout(finish, 1800);
+    });
+
     const startedAt = Date.now();
     while (Date.now() - startedAt < 9000) {
+      try {
+        if (videoEl.paused) await videoEl.play();
+      } catch {
+        // ignore and keep retrying while browser finishes permission/camera init
+      }
       const hasFrame = videoEl.videoWidth > 0 && videoEl.readyState >= 2;
       if (hasFrame) return;
       await new Promise((r) => setTimeout(r, 200));
@@ -735,40 +759,50 @@ export default function ScannerCattura() {
         audio: false,
       });
 
-    const candidates = [
-      { facingMode: { exact: "environment" } },
-      { facingMode: { ideal: "environment" } },
+    if (!videoRef.current) throw new Error("Video element assente.");
+    const video = videoRef.current;
+    const candidates: Array<MediaTrackConstraints | true> = [
+      { facingMode: { exact: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } },
+      { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } },
+      { facingMode: { ideal: "environment" }, width: { ideal: 960 }, height: { ideal: 540 } },
       true,
     ];
 
-    let stream: MediaStream | null = null;
+    let lastErr: unknown = null;
     for (const c of candidates) {
+      let stream: MediaStream | null = null;
       try {
         stream = await getStream(c);
-        if (stream) break;
-      } catch {
-        // try next
+        streamRef.current = stream;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (video as any).srcObject = stream;
+        video.playsInline = true;
+        video.muted = true;
+        // Needed by some mobile browsers to avoid fullscreen/blank-frame transitions.
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (video as any).setAttribute?.("webkit-playsinline", "true");
+        video.autoplay = true;
+
+        try {
+          await video.play();
+        } catch {
+          // Some browsers reject first call before metadata; ensureCameraReady retries play().
+        }
+
+        await ensureCameraReady();
+        return;
+      } catch (e) {
+        lastErr = e;
+        if (stream) {
+          stream.getTracks().forEach((t) => t.stop());
+        }
+        streamRef.current = null;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (video as any).srcObject = null;
       }
     }
-    if (!stream) throw new Error("Impossibile avviare la fotocamera.");
 
-    streamRef.current = stream;
-    if (!videoRef.current) throw new Error("Video element assente.");
-
-    const video = videoRef.current;
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (video as any).srcObject = stream;
-    video.playsInline = true;
-    video.muted = true;
-    video.autoplay = true;
-
-    try {
-      void video.play();
-    } catch {
-      // ignore
-    }
-
-    await ensureCameraReady();
+    throw lastErr instanceof Error ? lastErr : new Error("Impossibile avviare la fotocamera.");
   };
 
   const startCamera = async () => {
