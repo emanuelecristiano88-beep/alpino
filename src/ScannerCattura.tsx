@@ -1396,10 +1396,45 @@ export default function ScannerCattura() {
                     );
                   case "ready":
                     return (
-                      <FootCanvas
-                        metrics={DEFAULT_METRICS}
-                        meshUrl={meshPreviewUrl ?? undefined}
-                      />
+                      <div className="relative">
+                        <FootCanvas
+                          metrics={DEFAULT_METRICS}
+                          meshUrl={meshPreviewUrl ?? undefined}
+                        />
+                        <div className="pointer-events-none absolute inset-0 flex flex-col justify-between p-4 sm:p-5">
+                          <motion.div
+                            initial={{ opacity: 0, y: -12 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            transition={{ duration: 0.36, ease: "easeOut" }}
+                            className="rounded-xl border border-white/15 bg-black/45 p-4 text-center backdrop-blur-md"
+                          >
+                            <div className="font-mono text-xs tracking-[0.16em] text-white/85">
+                              Il tuo piede digitale
+                            </div>
+                            <div className="mt-2 text-xs text-zinc-200/95">
+                              Calzata personalizzata in creazione
+                            </div>
+                          </motion.div>
+
+                          <motion.div
+                            initial={{ opacity: 0, y: 14 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            transition={{ duration: 0.42, delay: 0.08, ease: "easeOut" }}
+                            className="mx-auto flex w-full max-w-[300px] flex-col items-center gap-2"
+                          >
+                            <div className="text-[11px] text-zinc-200/85">
+                              Ruota il modello
+                            </div>
+                            <Button
+                              type="button"
+                              onClick={leaveMeshVisualization}
+                              className="pointer-events-auto h-auto w-full rounded-xl bg-blue-500 px-6 py-3 font-mono text-sm tracking-[0.12em] text-white hover:bg-blue-400"
+                            >
+                              CONTINUA
+                            </Button>
+                          </motion.div>
+                        </div>
+                      </div>
                     );
                   case "error":
                     return (
@@ -1411,16 +1446,18 @@ export default function ScannerCattura() {
                     return null;
                 }
               })()}
-              <div className="mt-4">
-                <Button
-                  type="button"
-                  variant="outline"
-                  onClick={leaveMeshVisualization}
-                  className="h-auto w-full rounded-xl border-zinc-800 bg-zinc-900/50 px-6 py-4 font-mono text-sm tracking-[0.12em] text-zinc-100 backdrop-blur-md hover:bg-zinc-800 hover:text-zinc-100"
-                >
-                  TORNA ALLA GALLERY
-                </Button>
-              </div>
+              {scanMeshViewerStatus !== "ready" && (
+                <div className="mt-4">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={leaveMeshVisualization}
+                    className="h-auto w-full rounded-xl border-zinc-800 bg-zinc-900/50 px-6 py-4 font-mono text-sm tracking-[0.12em] text-zinc-100 backdrop-blur-md hover:bg-zinc-800 hover:text-zinc-100"
+                  >
+                    TORNA ALLA GALLERY
+                  </Button>
+                </div>
+              )}
             </div>
           </div>
         )}
