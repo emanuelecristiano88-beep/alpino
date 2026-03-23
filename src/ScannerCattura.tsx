@@ -42,8 +42,8 @@ const PHOTOS_PER_PHASE = 8;
 const TOTAL_PHOTOS = PHOTOS_PER_PHASE * 4;
 /** Upload cloud: sottoinsieme per fase per ridurre timeout serverless (es. 3 x 4 x 2 piedi = 24 foto). */
 const UPLOAD_PHOTOS_PER_PHASE = 3;
-const MAX_OUTPUT_DIM = 640; // downscale aggressively to survive Vercel payload limits
-const JPEG_QUALITY = 0.56; // used for both JPEG and WebP quality
+const MAX_OUTPUT_DIM = 1024; // compress before upload, keep aspect ratio
+const JPEG_QUALITY = 0.6; // lighter upload payload
 const DEFAULT_METRICS: Metrics = { footLengthMm: 265, forefootWidthMm: 95 };
 
 const PHASES = SCAN_CAPTURE_PHASES;
@@ -117,33 +117,18 @@ async function captureFrameAsJpeg(video: HTMLVideoElement) {
   const vW = video.videoWidth || 1280;
   const vH = video.videoHeight || 720;
   if (!vW || !vH) return null;
-
-  const targetBytes = 550_000;
-
-  const renderOnce = async (maxDim: number, quality: number): Promise<Blob | null> => {
-    const scale = Math.min(1, maxDim / Math.max(vW, vH));
-    const cW = Math.max(1, Math.round(vW * scale));
-    const cH = Math.max(1, Math.round(vH * scale));
-
-    const canvas = document.createElement("canvas");
-    canvas.width = cW;
-    canvas.height = cH;
-    const ctx = canvas.getContext("2d", { alpha: false });
-    if (!ctx) return null;
-
-    ctx.drawImage(video, 0, 0, cW, cH);
-
-    return new Promise<Blob | null>((resolve) => {
-      canvas.toBlob((b) => resolve(b), "image/webp", quality);
-    });
-  };
-
-  const first = await renderOnce(MAX_OUTPUT_DIM, JPEG_QUALITY);
-  if (first && first.size <= targetBytes) return first;
-
-  // Retry only if too large: stricter encode to survive Vercel payload limits.
-  const second = await renderOnce(Math.max(480, Math.floor(MAX_OUTPUT_DIM * 0.82)), Math.min(0.5, JPEG_QUALITY * 0.75));
-  return second;
+  const scale = Math.min(1, MAX_OUTPUT_DIM / Math.max(vW, vH));
+  const cW = Math.max(1, Math.round(vW * scale));
+  const cH = Math.max(1, Math.round(vH * scale));
+  const canvas = document.createElement("canvas");
+  canvas.width = cW;
+  canvas.height = cH;
+  const ctx = canvas.getContext("2d", { alpha: false });
+  if (!ctx) return null;
+  ctx.drawImage(video, 0, 0, cW, cH);
+  return new Promise<Blob | null>((resolve) => {
+    canvas.toBlob((b) => resolve(b), "image/jpeg", JPEG_QUALITY);
+  });
 }
 
 function selectRepresentativePhaseFrames<T>(frames: T[], perPhase: number): T[] {
@@ -833,11 +818,11 @@ export default function ScannerCattura() {
       const items: { blob: Blob; name: string }[] = [
         ...uploadLeft.map((p, idx) => ({
           blob: p.blob,
-          name: `left_${String(idx).padStart(2, "0")}.webp`,
+          name: `left_${String(idx).padStart(2, "0")}.jpg`,
         })),
         ...uploadRight.map((p, idx) => ({
           blob: p.blob,
-          name: `right_${String(idx).padStart(2, "0")}.webp`,
+          name: `right_${String(idx).padStart(2, "0")}.jpg`,
         })),
       ];
 
@@ -860,7 +845,7 @@ export default function ScannerCattura() {
             fileName: item.name,
             folderId: driveFolderId || "",
             scanId: sessionScanId,
-            mimeType: item.blob.type || "image/webp",
+            mimeType: item.blob.type || "image/jpeg",
           }),
           headers: {
             "Content-Type": "application/json",
