@@ -81,8 +81,8 @@ export default function ScannerAlignmentOverlay({
   const { guide, markerCentersNorm, arucoEngine } = alignment;
 
   const arucoLocked = arucoEngine === "ready" && markerCentersNorm != null && markerCentersNorm.length >= 4;
-  const arucoPartial = arucoEngine === "ready" && alignment.markerCount >= 2 && !arucoLocked;
-  const arucoBad = guide === "too_close" || (arucoEngine === "ready" && alignment.markerCount < 2);
+  const arucoPartial = arucoEngine === "ready" && alignment.markerCount >= 1 && !arucoLocked;
+  const arucoBad = guide === "too_close" || (arucoEngine === "ready" && alignment.markerCount < 1);
   const isArucoLandscape = useMemo(() => {
     if (!arucoLocked || !markerCentersNorm || markerCentersNorm.length < 4) return false;
     let minX = Number.POSITIVE_INFINITY;

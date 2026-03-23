@@ -44,13 +44,14 @@ const STABLE_ALIGNMENT_MS = 800;
 const BURST_FRAME_GAP_MS = 70;
 const PHASE_COUNTDOWN_START = 2;
 const PHASE_SUCCESS_HOLD_MS = 650;
+const INLINE_REFERENCE_MS = 1800;
 const PHOTOS_PER_PHASE = 8;
 const TOTAL_PHOTOS = PHOTOS_PER_PHASE * 4;
 /** Upload cloud: sottoinsieme per fase per ridurre timeout serverless (es. 3 x 4 x 2 piedi = 24 foto). */
 const UPLOAD_PHOTOS_PER_PHASE = 3;
 const RECON_PHOTOS_PER_PHASE_DEFAULT = 4;
 const RECON_PHOTOS_PER_PHASE_FAST = 5;
-const LIVE_MIN_ARUCO_MARKERS = 2;
+const LIVE_MIN_ARUCO_MARKERS = 1;
 const ARUCO_MARKER_SIZE_MM = Number(import.meta.env.VITE_ARUCO_MARKER_SIZE_MM || 40);
 const MIN_ARUCO_SHARPNESS = 45;
 const MIN_FULL_ARUCO_PER_FOOT = 2;
@@ -428,6 +429,7 @@ export default function ScannerCattura() {
   const [scanMeshViewerStatus, setScanMeshViewerStatus] = useState<ScanMeshViewerStatus>("idle");
   const [meshPreviewUrl, setMeshPreviewUrl] = useState<string | null>(null);
   const [reconstructedCloud, setReconstructedCloud] = useState<PointCloud | null>(null);
+  const [showInlineReference, setShowInlineReference] = useState(true);
   const currentFootRef = useRef<FootId>("LEFT");
   const autoStartedPhaseRef = useRef<number>(-1);
   const startBurstSequenceRef = useRef<() => void>(() => {});
@@ -525,6 +527,16 @@ export default function ScannerCattura() {
       capturePhaseLockRef.current = false;
     }
   }, [cameraState]);
+
+  useEffect(() => {
+    if (cameraState !== "readyPhase") {
+      setShowInlineReference(false);
+      return;
+    }
+    setShowInlineReference(true);
+    const t = window.setTimeout(() => setShowInlineReference(false), INLINE_REFERENCE_MS);
+    return () => window.clearTimeout(t);
+  }, [cameraState, phaseIndex, currentFoot]);
 
   /** Una tacca per fase (4): percezione 1 acquisizione / fase, 8 frame nascosti sotto */
   const progressTacks = useMemo(() => {
@@ -1330,12 +1342,18 @@ export default function ScannerCattura() {
           </div>
         )}
 
-        {(cameraState === "readyPhase" || cameraState === "capturingPhase") && (
-          <div className="pointer-events-none absolute right-2 top-[5.4rem] z-[86] w-[min(44vw,220px)]">
+        {cameraState === "readyPhase" && showInlineReference && (
+          <motion.div
+            initial={{ opacity: 0, scale: 0.96, y: -8 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.22, ease: "easeOut" }}
+            className="pointer-events-none absolute right-2 top-[5.4rem] z-[86] w-[min(44vw,220px)]"
+          >
             <div className="overflow-hidden rounded-xl border border-white/15 bg-black/45 shadow-lg backdrop-blur-[1px]">
               <ScanPhaseGuideIllustration phaseId={phaseIndex} variant="compact" />
             </div>
-          </div>
+          </motion.div>
         )}
 
         {/* Countdown unico per fase (3→2→1) prima del burst nascosto */}
