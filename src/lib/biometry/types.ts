@@ -9,6 +9,7 @@ export const NEUMA_SHEET_MARKER_IDS = [0, 1, 2, 3] as const;
 /** Keypoint semantici (plantare / contorno in vista dall’alto). */
 export type NeumaKeypointId =
   | "hallux_tip"
+  | "arch_medial"
   | "metatarsal_medial"
   | "metatarsal_lateral"
   | "heel_center"

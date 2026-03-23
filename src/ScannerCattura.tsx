@@ -2,7 +2,9 @@
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
+import { Canvas } from "@react-three/fiber";
 import FootCanvas from "../components/three/FootCanvas";
+import FootPointCloudPreview from "../components/three/FootPointCloudPreview";
 import { Button } from "./components/ui/button";
 import { Checkbox } from "./components/ui/checkbox";
 import { Label } from "./components/ui/label";
@@ -18,6 +20,9 @@ import ScannerShutterButton from "./components/scanner/ScannerShutterButton";
 import BiometryOverlayPreview from "./components/scanner/BiometryOverlayPreview";
 import { computeNeumaBiometryFromImageData, type NeumaBiometryResult } from "./lib/biometry";
 import type { Mat3 } from "./lib/biometry/homography";
+import { ensureArucoDetector, detectArucoOnImageDataMultiDictionary } from "./lib/aruco/arucoWasm";
+import { pickCornerMarkers, type ArucoMarkerDetection, type ArucoMarkerPoint } from "./lib/aruco/a4MarkerGeometry";
+import { reconstructFootFromBlobs, type PointCloud } from "./lib/reconstruction";
 import { Check, Loader2, Smartphone } from "lucide-react";
 import { SCAN_CAPTURE_PHASES, type ScanPhaseId } from "./constants/scanCapturePhases";
 import type { ScanMeshViewerStatus } from "./types/scanProcessing";
@@ -42,6 +47,11 @@ const PHOTOS_PER_PHASE = 8;
 const TOTAL_PHOTOS = PHOTOS_PER_PHASE * 4;
 /** Upload cloud: sottoinsieme per fase per ridurre timeout serverless (es. 3 x 4 x 2 piedi = 24 foto). */
 const UPLOAD_PHOTOS_PER_PHASE = 3;
+const RECON_PHOTOS_PER_PHASE_DEFAULT = 4;
+const RECON_PHOTOS_PER_PHASE_FAST = 5;
+const ARUCO_MARKER_SIZE_MM = Number(import.meta.env.VITE_ARUCO_MARKER_SIZE_MM || 40);
+const MIN_ARUCO_SHARPNESS = 45;
+const MIN_FULL_ARUCO_PER_PHASE = 1;
 const MAX_OUTPUT_DIM = 1024; // compress before upload, keep aspect ratio
 const JPEG_QUALITY = 0.5; // aggressive JPEG quality for upload
 const MAX_UPLOAD_FILE_BYTES = 200 * 1024; // target < 200KB
@@ -190,6 +200,104 @@ function selectRepresentativePhaseFrames<T>(frames: T[], perPhase: number): T[] 
   return selected;
 }
 
+function pointDistance(a: ArucoMarkerPoint, b: ArucoMarkerPoint): number {
+  return Math.hypot(a.x - b.x, a.y - b.y);
+}
+
+function markerMeanEdgePx(marker: ArucoMarkerDetection): number {
+  const c = marker.corners;
+  if (!c || c.length < 4) return 0;
+  return (
+    (pointDistance(c[0], c[1]) +
+      pointDistance(c[1], c[2]) +
+      pointDistance(c[2], c[3]) +
+      pointDistance(c[3], c[0])) /
+    4
+  );
+}
+
+function markerSharpnessScore(imageData: ImageData, marker: ArucoMarkerDetection): number {
+  const xs = marker.corners.map((p) => p.x);
+  const ys = marker.corners.map((p) => p.y);
+  const pad = 8;
+  const x0 = Math.max(0, Math.floor(Math.min(...xs) - pad));
+  const y0 = Math.max(0, Math.floor(Math.min(...ys) - pad));
+  const x1 = Math.min(imageData.width - 1, Math.ceil(Math.max(...xs) + pad));
+  const y1 = Math.min(imageData.height - 1, Math.ceil(Math.max(...ys) + pad));
+  const data = imageData.data;
+  const w = imageData.width;
+  const h = imageData.height;
+  const gray = (x: number, y: number) => {
+    const i = (y * w + x) * 4;
+    return 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+  };
+  let n = 0;
+  let sum = 0;
+  let sumSq = 0;
+  for (let y = Math.max(1, y0); y < Math.min(h - 1, y1); y++) {
+    for (let x = Math.max(1, x0); x < Math.min(w - 1, x1); x++) {
+      const center = gray(x, y);
+      const lap = gray(x - 1, y) + gray(x + 1, y) + gray(x, y - 1) + gray(x, y + 1) - 4 * center;
+      n += 1;
+      sum += lap;
+      sumSq += lap * lap;
+    }
+  }
+  if (n < 8) return 0;
+  const mean = sum / n;
+  return sumSq / n - mean * mean;
+}
+
+async function validateArucoOnPhoto(blob: Blob) {
+  const imageData = await blobToImageData(blob);
+  await ensureArucoDetector();
+  const detected = await detectArucoOnImageDataMultiDictionary(imageData);
+  if (!detected || detected.detections.length === 0) {
+    return { ok: false as const, reason: "marker_not_found" as const };
+  }
+  const picked = pickCornerMarkers(detected.detections, imageData.width, imageData.height);
+  if (!picked.length) return { ok: false as const, reason: "marker_not_found" as const };
+  const best = [...picked].sort((a, b) => markerMeanEdgePx(b) - markerMeanEdgePx(a))[0];
+  if (!best || best.corners.length < 4) return { ok: false as const, reason: "marker_not_found" as const };
+  const sharpness = markerSharpnessScore(imageData, best);
+  if (sharpness < MIN_ARUCO_SHARPNESS) {
+    return { ok: false as const, reason: "marker_blurry" as const, sharpness };
+  }
+  const meanEdgePx = markerMeanEdgePx(best);
+  if (meanEdgePx <= 0) return { ok: false as const, reason: "marker_not_found" as const };
+  const pixelsPerMm = meanEdgePx / ARUCO_MARKER_SIZE_MM;
+  const hasFullAruco = picked.length >= 4;
+  let footLandmarks: {
+    halluxTipMm: { x: number; y: number };
+    heelCenterMm: { x: number; y: number };
+    archMedialMm: { x: number; y: number };
+  } | null = null;
+
+  if (hasFullAruco) {
+    const biometry = await computeNeumaBiometryFromImageData(imageData, { markers: picked, pxPerMm: 4 });
+    const hallux = biometry.keypoints.find((k) => k.id === "hallux_tip");
+    const heel = biometry.keypoints.find((k) => k.id === "heel_center");
+    const arch = biometry.keypoints.find((k) => k.id === "arch_medial");
+    if (!hallux || !heel || !arch) {
+      return { ok: false as const, reason: "foot_points_missing" as const };
+    }
+    footLandmarks = {
+      halluxTipMm: { x: hallux.xMm, y: hallux.yMm },
+      heelCenterMm: { x: heel.xMm, y: heel.yMm },
+      archMedialMm: { x: arch.xMm, y: arch.yMm },
+    };
+  }
+  return {
+    ok: true as const,
+    dictionary: detected.dictionary,
+    hasFullAruco,
+    corners: best.corners.slice(0, 4),
+    sharpness,
+    pixelsPerMm,
+    footLandmarks,
+  };
+}
+
 function sleep(ms: number) {
   return new Promise<void>((resolve) => {
     window.setTimeout(resolve, ms);
@@ -316,6 +424,7 @@ export default function ScannerCattura() {
   const meshGenTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [scanMeshViewerStatus, setScanMeshViewerStatus] = useState<ScanMeshViewerStatus>("idle");
   const [meshPreviewUrl, setMeshPreviewUrl] = useState<string | null>(null);
+  const [reconstructedCloud, setReconstructedCloud] = useState<PointCloud | null>(null);
   const currentFootRef = useRef<FootId>("LEFT");
   const autoStartedPhaseRef = useRef<number>(-1);
   const startBurstSequenceRef = useRef<() => void>(() => {});
@@ -388,6 +497,19 @@ export default function ScannerCattura() {
     (cameraState === "readyPhase" || cameraState === "capturingPhase") && phaseGuideAccepted;
   const alignment = useScanAlignmentAnalysis(videoRef, scanOverlayEnabled, phaseIndex);
   const frameTilt = useScanFrameOrientation(scanOverlayEnabled);
+  const arucoRecognized =
+    alignment.arucoEngine === "ready" &&
+    alignment.markerCentersNorm != null &&
+    alignment.markerCentersNorm.length >= 4;
+  const captureReady = phaseGuideAccepted && alignment.guide === "aligned" && arucoRecognized;
+  const reconPhotosPerPhase = useMemo(() => {
+    if (typeof navigator === "undefined") return RECON_PHOTOS_PER_PHASE_DEFAULT;
+    const cores = navigator.hardwareConcurrency ?? 4;
+    const maybeMem = (navigator as Navigator & { deviceMemory?: number }).deviceMemory ?? 4;
+    return cores >= 6 && maybeMem >= 4
+      ? RECON_PHOTOS_PER_PHASE_FAST
+      : RECON_PHOTOS_PER_PHASE_DEFAULT;
+  }, []);
   const { tooTilted } = useDeviceTilt(
     (cameraState === "readyPhase" || cameraState === "capturingPhase") && phaseGuideAccepted,
     45
@@ -439,21 +561,49 @@ export default function ScannerCattura() {
     }
   };
 
-  /** Simula attesa backend (setTimeout) prima di mostrare il placeholder 3D */
+  /** Ricostruzione locale point-cloud -> preview 3D */
   const beginMeshVisualization = () => {
     if (meshGenTimeoutRef.current) {
       clearTimeout(meshGenTimeoutRef.current);
       meshGenTimeoutRef.current = null;
     }
     setMeshPreviewUrl(null);
+    setReconstructedCloud(null);
     stopStream();
     setCameraState("visualizing");
     setScanMeshViewerStatus("processing");
-    meshGenTimeoutRef.current = setTimeout(() => {
-      meshGenTimeoutRef.current = null;
-      setMeshPreviewUrl("/path/to/mock.stl");
-      setScanMeshViewerStatus("ready");
-    }, 4000);
+    void (async () => {
+      try {
+        const reconLeft = selectRepresentativePhaseFrames(photosLeft, reconPhotosPerPhase);
+        const reconRight = selectRepresentativePhaseFrames(photosRight, reconPhotosPerPhase);
+        const reconItems = [...reconLeft, ...reconRight].map((p) => ({
+          blob: p.blob,
+          phaseId: p.phaseId,
+        }));
+
+        if (!reconItems.length) {
+          throw new Error("Nessuna foto disponibile per la ricostruzione");
+        }
+
+        const result = await reconstructFootFromBlobs(reconItems, {
+          maxImageSide: 220,
+          sampleStep: 3,
+          voxelSizeMm: 5,
+          multiViewRefinementIterations: 2,
+        });
+
+        if (!result.cloud?.pointCount) {
+          throw new Error("Point cloud vuota");
+        }
+
+        setReconstructedCloud(result.cloud);
+        setMeshPreviewUrl("/local/reconstructed-point-cloud");
+        setScanMeshViewerStatus("ready");
+      } catch (e) {
+        console.error("[ScannerCattura] reconstruction", e);
+        setScanMeshViewerStatus("error");
+      }
+    })();
   };
 
   const leaveMeshVisualization = () => {
@@ -463,6 +613,7 @@ export default function ScannerCattura() {
     }
     setScanMeshViewerStatus("idle");
     setMeshPreviewUrl(null);
+    setReconstructedCloud(null);
     setCameraState("review");
   };
 
@@ -690,6 +841,7 @@ export default function ScannerCattura() {
   const beginPhaseBurstSequence = () => {
     if (!videoRef.current) return;
     if (!phaseGuideAccepted) return;
+    if (!captureReady) return;
     if (burstInFlightRef.current) return;
     if (cameraState !== "readyPhase") return;
 
@@ -777,12 +929,13 @@ export default function ScannerCattura() {
   useEffect(() => {
     if (cameraState !== "readyPhase") return;
     if (!phaseGuideAccepted) return;
+    if (!captureReady) return;
     if (alignment.stableAlignedMs < STABLE_ALIGNMENT_MS) return;
     if (autoStartedPhaseRef.current === phaseIndex) return;
     if (!videoRef.current) return;
     if (burstInFlightRef.current) return;
     startBurstSequenceRef.current();
-  }, [cameraState, alignment.stableAlignedMs, phaseIndex, phaseGuideAccepted]);
+  }, [cameraState, alignment.stableAlignedMs, phaseIndex, phaseGuideAccepted, captureReady]);
 
   // stop phase when reached 8
   useEffect(() => {
@@ -836,6 +989,7 @@ export default function ScannerCattura() {
     }
     setScanMeshViewerStatus("idle");
     setMeshPreviewUrl(null);
+    setReconstructedCloud(null);
     setCameraState("idle");
   };
 
@@ -856,16 +1010,55 @@ export default function ScannerCattura() {
       const uploadLeft = selectRepresentativePhaseFrames(photosLeft, UPLOAD_PHOTOS_PER_PHASE);
       const uploadRight = selectRepresentativePhaseFrames(photosRight, UPLOAD_PHOTOS_PER_PHASE);
 
-      const items: { blob: Blob; name: string }[] = [
+      const items: { blob: Blob; name: string; phaseId: PhaseId; foot: FootId }[] = [
         ...uploadLeft.map((p, idx) => ({
           blob: p.blob,
           name: `left_${String(idx).padStart(2, "0")}.jpg`,
+          phaseId: p.phaseId,
+          foot: "LEFT" as FootId,
         })),
         ...uploadRight.map((p, idx) => ({
           blob: p.blob,
           name: `right_${String(idx).padStart(2, "0")}.jpg`,
+          phaseId: p.phaseId,
+          foot: "RIGHT" as FootId,
         })),
       ];
+
+      const validations = await Promise.all(items.map((it) => validateArucoOnPhoto(it.blob)));
+      const fullArucoCountByPhase = new Map<string, number>();
+      for (let i = 0; i < validations.length; i++) {
+        const v = validations[i];
+        if (!v.ok || !v.hasFullAruco) continue;
+        const key = `${items[i].foot}-${items[i].phaseId}`;
+        fullArucoCountByPhase.set(key, (fullArucoCountByPhase.get(key) ?? 0) + 1);
+      }
+      const missingCalibration = items.find((it) => {
+        const key = `${it.foot}-${it.phaseId}`;
+        return (fullArucoCountByPhase.get(key) ?? 0) < MIN_FULL_ARUCO_PER_PHASE;
+      });
+      if (missingCalibration) {
+        throw new Error(
+          `Fase ${missingCalibration.phaseId + 1} ${missingCalibration.foot === "LEFT" ? "piede sinistro" : "piede destro"}: manca almeno una foto con 4 marker ArUco visibili. Rifai la fase mantenendo il foglio piu in vista.`
+        );
+      }
+      const firstInvalidIdx = validations.findIndex((v) => !v.ok);
+      if (firstInvalidIdx >= 0) {
+        const invalid = validations[firstInvalidIdx];
+        if (invalid.reason === "marker_blurry") {
+          throw new Error(
+            `Foto ${firstInvalidIdx + 1}/${items.length} troppo sfocata per leggere il marker ArUco. Ripeti la scansione mantenendo il telefono piu stabile.`
+          );
+        }
+        if (invalid.reason === "foot_points_missing") {
+          throw new Error(
+            `Foto ${firstInvalidIdx + 1}/${items.length} valida ArUco ma punti piede incompleti (alluce/tallone/arco). Inquadratura non valida, invio bloccato.`
+          );
+        }
+        throw new Error(
+          `Foto ${firstInvalidIdx + 1}/${items.length} senza marker ArUco visibile. Inquadratura non valida, invio bloccato.`
+        );
+      }
 
       const sessionScanId =
         scanId ||
@@ -880,6 +1073,13 @@ export default function ScannerCattura() {
         setProcessingStatusText(`Caricamento foto ${i + 1} di ${items.length}...`);
         const uploadBlob = await compressBlobForUpload(item.blob);
         const imageBase64 = await blobToBase64(uploadBlob);
+        const arucoMeta = validations[i];
+        const markerCorners = arucoMeta.ok ? arucoMeta.corners : [];
+        const pixelsPerMm = arucoMeta.ok ? arucoMeta.pixelsPerMm : null;
+        const arucoDictionary = arucoMeta.ok ? arucoMeta.dictionary : null;
+        const markerSharpness = arucoMeta.ok ? arucoMeta.sharpness : null;
+        const hasFullAruco = arucoMeta.ok ? arucoMeta.hasFullAruco : false;
+        const footLandmarks = arucoMeta.ok ? arucoMeta.footLandmarks : null;
         const res = await fetch("/api/upload-single", {
           method: "POST",
           body: JSON.stringify({
@@ -888,6 +1088,13 @@ export default function ScannerCattura() {
             folderId: driveFolderId || "",
             scanId: sessionScanId,
             mimeType: uploadBlob.type || "image/jpeg",
+            markerCorners,
+            pixelsPerMm,
+            arucoDictionary,
+            markerSharpness,
+            hasFullAruco,
+            markerSizeMm: ARUCO_MARKER_SIZE_MM,
+            footLandmarks,
           }),
           headers: {
             "Content-Type": "application/json",
@@ -1090,9 +1297,22 @@ export default function ScannerCattura() {
         )}
         {(cameraState === "readyPhase" || cameraState === "capturingPhase") &&
           phaseGuideAccepted &&
-          alignment.guide === "aligned" && (
+          captureReady && (
           <div className="pointer-events-none absolute left-3 top-[6.25rem] z-[86] rounded-lg border border-emerald-500/45 bg-emerald-950/60 px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wide text-emerald-100">
             Posizione ottimale
+          </div>
+        )}
+        {(cameraState === "readyPhase" || cameraState === "capturingPhase") &&
+          phaseGuideAccepted &&
+          !captureReady && (
+          <div className="pointer-events-none absolute left-3 top-[8.6rem] z-[86] rounded-lg border border-sky-500/45 bg-sky-950/60 px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wide text-sky-100">
+            {alignment.arucoEngine !== "ready"
+              ? "Calibrazione ArUco in avvio..."
+              : alignment.markerCount >= 4
+                ? alignment.guide === "aligned"
+                  ? "Marker ArUco OK (4/4)"
+                  : "Marker ArUco OK - allinea la posizione"
+                : `Inquadra marker ArUco (${alignment.markerCount}/4)`}
           </div>
         )}
 
@@ -1316,9 +1536,9 @@ export default function ScannerCattura() {
                 <ScannerShutterButton
                   progress={phaseIndex / 4}
                   onClick={
-                    cameraState === "readyPhase" && phaseGuideAccepted ? beginPhaseBurstSequence : undefined
+                    cameraState === "readyPhase" && captureReady ? beginPhaseBurstSequence : undefined
                   }
-                  disabled={cameraState === "capturingPhase"}
+                  disabled={cameraState === "capturingPhase" || (cameraState === "readyPhase" && !captureReady)}
                   capturing={cameraState === "capturingPhase"}
                   label={
                     cameraState === "capturingPhase"
@@ -1329,7 +1549,9 @@ export default function ScannerCattura() {
                           : burstMidCapture
                             ? "In corso…"
                             : "Acquisizione…"
-                      : `Tocca · avvia fase ${phaseIndex + 1}`
+                      : captureReady
+                        ? `Tocca · avvia fase ${phaseIndex + 1}`
+                        : "Allinea marker ArUco"
                   }
                 />
               </div>
@@ -1469,10 +1691,34 @@ export default function ScannerCattura() {
                   case "ready":
                     return (
                       <div className="relative">
-                        <FootCanvas
-                          metrics={DEFAULT_METRICS}
-                          meshUrl={meshPreviewUrl ?? undefined}
-                        />
+                        {reconstructedCloud ? (
+                          <div className="h-[360px] w-full overflow-hidden rounded-xl border border-white/10 bg-black/20">
+                            <Canvas
+                              dpr={[1, 1.75]}
+                              frameloop="demand"
+                              camera={{ position: [0.28, 0.18, 0.9], fov: 34 }}
+                              gl={{
+                                alpha: true,
+                                antialias: true,
+                                powerPreference: "high-performance",
+                              }}
+                            >
+                              <ambientLight intensity={0.5} />
+                              <directionalLight intensity={1.15} position={[2.4, 3.5, 2.8]} />
+                              <FootPointCloudPreview
+                                cloud={reconstructedCloud}
+                                introAnimation
+                                showVisualizationToggle
+                                heatmapAxis="y"
+                              />
+                            </Canvas>
+                          </div>
+                        ) : (
+                          <FootCanvas
+                            metrics={DEFAULT_METRICS}
+                            meshUrl={meshPreviewUrl ?? undefined}
+                          />
+                        )}
                         <div className="pointer-events-none absolute inset-0 flex flex-col justify-between p-4 sm:p-5">
                           <motion.div
                             initial={{ opacity: 0, y: -12 }}

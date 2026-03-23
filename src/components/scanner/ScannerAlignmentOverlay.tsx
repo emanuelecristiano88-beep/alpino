@@ -4,6 +4,7 @@ import type { ScanAlignmentResult } from "../../hooks/useScanAlignmentAnalysis";
 import type { ScanFrameTilt } from "../../hooks/useScanFrameOrientation";
 
 const ELECTRIC = "#2563eb";
+const LOCKED = "#22c55e";
 
 /** Bracket + quadratino agli angoli: allinea i 4 marker ArUco del foglio a questo riquadro blu */
 function ArucoCornerHint({
@@ -72,23 +73,57 @@ export default function ScannerAlignmentOverlay({
   const borderWarning = guide === "too_close";
 
   const arucoLocked = arucoEngine === "ready" && markerCentersNorm != null && markerCentersNorm.length >= 4;
+  const isArucoLandscape = useMemo(() => {
+    if (!arucoLocked || !markerCentersNorm || markerCentersNorm.length < 4) return false;
+    let minX = Number.POSITIVE_INFINITY;
+    let maxX = Number.NEGATIVE_INFINITY;
+    let minY = Number.POSITIVE_INFINITY;
+    let maxY = Number.NEGATIVE_INFINITY;
+    for (const p of markerCentersNorm) {
+      minX = Math.min(minX, p.x);
+      maxX = Math.max(maxX, p.x);
+      minY = Math.min(minY, p.y);
+      maxY = Math.max(maxY, p.y);
+    }
+    const spanX = Math.max(0, maxX - minX);
+    const spanY = Math.max(0, maxY - minY);
+    return spanX > spanY * 1.08;
+  }, [arucoLocked, markerCentersNorm]);
 
   const tilt = frameTilt ?? { rotateX: 0, rotateY: 0, rotateZ: 0 };
 
   /** Fase 0 = dall’alto (cornice larga); 1–2 = laterali; 3 = posteriore/tallone (cornice più alta) */
   const bboxShapeClass = useMemo(() => {
+    const landscapeByAruco = isArucoLandscape;
     switch (phaseIndex) {
       case 0:
-        return "h-[50dvh] w-[64vw] max-h-[min(72dvh,600px)] max-w-[min(92vw,560px)]";
+        return landscapeByAruco
+          ? "h-[42dvh] w-[76vw] max-h-[min(62dvh,520px)] max-w-[min(96vw,660px)]"
+          : "h-[50dvh] w-[64vw] max-h-[min(72dvh,600px)] max-w-[min(92vw,560px)]";
       case 1:
       case 2:
-        return "h-[56dvh] w-[58vw] max-h-[min(76dvh,660px)] max-w-[min(90vw,480px)]";
+        return landscapeByAruco
+          ? "h-[44dvh] w-[74vw] max-h-[min(64dvh,560px)] max-w-[min(96vw,700px)]"
+          : "h-[56dvh] w-[58vw] max-h-[min(76dvh,660px)] max-w-[min(90vw,480px)]";
       case 3:
-        return "h-[58dvh] w-[52vw] max-h-[min(78dvh,680px)] max-w-[min(88vw,420px)]";
+        return landscapeByAruco
+          ? "h-[46dvh] w-[70vw] max-h-[min(66dvh,580px)] max-w-[min(94vw,640px)]"
+          : "h-[58dvh] w-[52vw] max-h-[min(78dvh,680px)] max-w-[min(88vw,420px)]";
       default:
-        return "h-[60dvh] w-[60vw] max-h-[min(80dvh,720px)] max-w-[min(92vw,520px)]";
+        return landscapeByAruco
+          ? "h-[46dvh] w-[74vw] max-h-[min(66dvh,600px)] max-w-[min(96vw,700px)]"
+          : "h-[60dvh] w-[60vw] max-h-[min(80dvh,720px)] max-w-[min(92vw,520px)]";
     }
-  }, [phaseIndex]);
+  }, [isArucoLandscape, phaseIndex]);
+
+  const frameStrokeClass = borderWarning
+    ? "border-amber-400/80 shadow-[0_0_0_1px_rgba(251,191,36,0.4)]"
+    : arucoLocked
+      ? "border-emerald-400/80 shadow-[0_0_32px_rgba(34,197,94,0.24)]"
+      : "border-[#2563eb]/50 shadow-[0_0_40px_rgba(37,99,235,0.18)]";
+
+  const frameBgClass = arucoLocked ? "bg-emerald-500/30" : "bg-[#2563eb]/50";
+  const reticleColor = arucoLocked ? LOCKED : ELECTRIC;
 
   return (
     <div className={cn("pointer-events-none flex min-h-0 flex-1 flex-col", className)}>
@@ -108,10 +143,8 @@ export default function ScannerAlignmentOverlay({
               className={cn(
                 "relative box-border rounded-3xl border-2 transition-[border-color,box-shadow] duration-300",
                 bboxShapeClass,
-                "bg-[#2563eb]/50",
-                borderWarning
-                  ? "border-amber-400/80 shadow-[0_0_0_1px_rgba(251,191,36,0.4)]"
-                  : "border-[#2563eb]/50 shadow-[0_0_40px_rgba(37,99,235,0.18)]"
+                frameBgClass,
+                frameStrokeClass
               )}
               aria-hidden
             >
@@ -135,16 +168,16 @@ export default function ScannerAlignmentOverlay({
                     cy="70"
                     r="58"
                     fill="none"
-                    stroke={ELECTRIC}
+                    stroke={reticleColor}
                     strokeWidth="2.5"
                     strokeOpacity={0.85}
                   />
-                  <circle cx="70" cy="70" r="46" fill="none" stroke={ELECTRIC} strokeWidth="1.5" strokeOpacity={0.45} />
-                  <circle cx="70" cy="70" r="34" fill="none" stroke={ELECTRIC} strokeWidth="1" strokeOpacity={0.35} />
+                  <circle cx="70" cy="70" r="46" fill="none" stroke={reticleColor} strokeWidth="1.5" strokeOpacity={0.45} />
+                  <circle cx="70" cy="70" r="34" fill="none" stroke={reticleColor} strokeWidth="1" strokeOpacity={0.35} />
                   {arucoLocked ? (
-                    <circle cx="70" cy="70" r="22" fill={ELECTRIC} fillOpacity={0.5} />
+                    <circle cx="70" cy="70" r="22" fill={reticleColor} fillOpacity={0.5} />
                   ) : (
-                    <circle cx="70" cy="70" r="6" fill="none" stroke={ELECTRIC} strokeWidth="2" strokeOpacity={0.9} />
+                    <circle cx="70" cy="70" r="6" fill="none" stroke={reticleColor} strokeWidth="2" strokeOpacity={0.9} />
                   )}
                 </svg>
               </div>

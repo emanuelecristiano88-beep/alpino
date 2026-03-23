@@ -25,6 +25,8 @@ export type ScanAlignmentSnapshot = {
    * Solo con WASM ArUco attivo e ≥4 marker scelti agli angoli.
    */
   markerCentersNorm: { x: number; y: number }[] | null;
+  /** Marker ArUco rilevati nel frame corrente (prima della selezione corner) */
+  markerCount: number;
 };
 
 const DEFAULT_SNAPSHOT: ScanAlignmentSnapshot = {
@@ -34,6 +36,7 @@ const DEFAULT_SNAPSHOT: ScanAlignmentSnapshot = {
   isPositionCorrect: false,
   arucoEngine: "loading",
   markerCentersNorm: null,
+  markerCount: 0,
 };
 
 function serializeMarkerCenters(m: { x: number; y: number }[] | null): string {
@@ -158,6 +161,7 @@ function combineArucoAndHeuristic(
       isPositionCorrect: false,
       arucoEngine,
       markerCentersNorm: null,
+      markerCount: 0,
     };
   }
 
@@ -184,6 +188,7 @@ function combineArucoAndHeuristic(
     isPositionCorrect,
     arucoEngine,
     markerCentersNorm: null,
+    markerCount: markers.length,
   };
 }
 
@@ -270,9 +275,11 @@ export function useScanAlignmentAnalysis(
     const engine = arucoEngineRef.current;
     let next: ScanAlignmentSnapshot;
     let markerCentersNorm: { x: number; y: number }[] | null = null;
+    let markerCount = 0;
 
     if (engine === "ready" && isArucoDetectorReady()) {
       const markers = detectArucoOnImageData(imageData);
+      markerCount = markers.length;
       next = combineArucoAndHeuristic(imageData, markers, "ready");
       const picked = pickCornerMarkers(markers, w, h);
       if (picked.length >= 4) {
@@ -287,13 +294,14 @@ export function useScanAlignmentAnalysis(
         ...heur,
         arucoEngine: engine === "loading" ? "loading" : "fallback",
         markerCentersNorm: null,
+        markerCount: 0,
       };
     } else {
-      next = { ...analyzeHeuristicOnly(imageData), arucoEngine: "fallback", markerCentersNorm: null };
+      next = { ...analyzeHeuristicOnly(imageData), arucoEngine: "fallback", markerCentersNorm: null, markerCount: 0 };
     }
 
     if (engine === "ready" && isArucoDetectorReady()) {
-      next = { ...next, markerCentersNorm };
+      next = { ...next, markerCentersNorm, markerCount };
     }
 
     const now = performance.now();
@@ -317,6 +325,7 @@ export function useScanAlignmentAnalysis(
         prev.footInFrame === next.footInFrame &&
         prev.isPositionCorrect === next.isPositionCorrect &&
         prev.arucoEngine === next.arucoEngine &&
+        prev.markerCount === next.markerCount &&
         serializeMarkerCenters(prev.markerCentersNorm) === serializeMarkerCenters(next.markerCentersNorm)
       ) {
         return prev;

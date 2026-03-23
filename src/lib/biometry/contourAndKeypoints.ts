@@ -85,6 +85,10 @@ export function keypointsFromContourMm(
   const med = metaPts[0] ?? hallux;
   const lat = metaPts[metaPts.length - 1] ?? hallux;
 
+  const yArch = minY + 0.6 * span;
+  const archPts = intersectHorizontalWithContour(contourPx, yArch);
+  const archMedial = archPts[0] ?? med;
+
   const heelSort = [...heelCandidates].sort((a, b) => a.xPx - b.xPx);
   const heelL = heelSort[0] ?? heelCenter;
   const heelR = heelSort[heelSort.length - 1] ?? heelCenter;
@@ -98,6 +102,13 @@ export function keypointsFromContourMm(
       zMm: 0,
       confidence: conf,
       notes: "Estremità distale; raffinabile con modello alluce",
+    },
+    {
+      id: "arch_medial" as NeumaKeypointId,
+      ...toMm(archMedial),
+      zMm: 0,
+      confidence: conf * 0.88,
+      notes: "Arco mediale stimato dal restringimento del medio-piede",
     },
     {
       id: "metatarsal_medial" as NeumaKeypointId,
