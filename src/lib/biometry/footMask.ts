@@ -8,6 +8,7 @@
 
 const SEGMENTER_MODEL_URL =
   "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_multiclass_256x256/float32/latest/selfie_multiclass_256x256.tflite";
+const TASKS_VISION_ESM_URL = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22/+esm";
 
 type SegmenterLike = {
   segment: (image: ImageData) => { categoryMask?: unknown } | null;
@@ -202,7 +203,22 @@ export async function ensureFootSegmenter(): Promise<SegmenterLike | null> {
   if (typeof window === "undefined") return null;
   if (!segmenterInitPromise) {
     segmenterInitPromise = (async () => {
-      const mod = await import("@mediapipe/tasks-vision");
+      const mod = (await import(
+        /* @vite-ignore */
+        TASKS_VISION_ESM_URL
+      )) as {
+        FilesetResolver: { forVisionTasks: (baseUrl: string) => Promise<unknown> };
+        ImageSegmenter: {
+          createFromOptions: (
+            vision: unknown,
+            options: {
+              baseOptions: { modelAssetPath: string };
+              runningMode: "IMAGE";
+              outputCategoryMask: boolean;
+            }
+          ) => Promise<SegmenterLike>;
+        };
+      };
       const vision = await mod.FilesetResolver.forVisionTasks(
         "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm"
       );
@@ -211,7 +227,7 @@ export async function ensureFootSegmenter(): Promise<SegmenterLike | null> {
         runningMode: "IMAGE",
         outputCategoryMask: true,
       });
-      return segmenter as unknown as SegmenterLike;
+      return segmenter;
     })().catch(() => null);
   }
   return segmenterInitPromise;
