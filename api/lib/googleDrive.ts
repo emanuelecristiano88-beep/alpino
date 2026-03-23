@@ -199,7 +199,10 @@ export async function uploadBufferToDrive(params: {
 }
 
 export function getRootFolderId(): string {
-  const id = process.env.GOOGLE_DRIVE_FOLDER_ID;
-  if (!id) throw new Error("GOOGLE_DRIVE_FOLDER_ID non configurato");
+  const raw = process.env.GOOGLE_DRIVE_FOLDER_ID;
+  if (!raw) throw new Error("GOOGLE_DRIVE_FOLDER_ID non configurato");
+  // Hard sanitize: Vercel env può contenere newline/spazi invisibili da copy-paste.
+  const id = raw.replace(/\s+/g, "").trim();
+  if (!id) throw new Error("GOOGLE_DRIVE_FOLDER_ID vuoto dopo sanitizzazione");
   return id;
 }

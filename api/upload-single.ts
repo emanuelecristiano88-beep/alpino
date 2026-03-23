@@ -105,7 +105,7 @@ export default async function handler(request: any, res?: any): Promise<Response
       return sendJson(request, res, { ok: false, error: "Payload immagine troppo piccolo" }, 400);
     }
 
-    let folderId = typeof body.folderId === "string" ? body.folderId.trim() : "";
+    let folderId = typeof body.folderId === "string" ? body.folderId.replace(/\s+/g, "").trim() : "";
     let folderLink: string | null = folderId ? `https://drive.google.com/drive/folders/${folderId}` : null;
 
     if (!folderId) {
