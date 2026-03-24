@@ -3,6 +3,9 @@
  * Convenzioni allineate a misurazioni ortopediche su plantare / last.
  */
 
+import type { FootParameters } from "../lib/footParameters/types";
+export type { FootParameters };
+
 /** Metriche per singolo piede (sinistro / destro). */
 export type FootSideMetrics = {
   /** $L$ — Lunghezza totale: dal tallone alla punta del dito più lungo (mm). */
@@ -29,4 +32,15 @@ export type ScanMetricsPayload = {
   right: FootSideMetrics;
   scanVersion?: string;
   updatedAt: string;
+  /**
+   * Structured foot parameters extracted by the footParameters pipeline.
+   * Present when extraction was performed (biometry, point cloud, or both).
+   * These drive parametric model deformation.
+   */
+  footParameters?: {
+    left?: FootParameters;
+    right?: FootParameters;
+    /** Combined parameters when left/right not distinguished. */
+    combined?: FootParameters;
+  };
 };
