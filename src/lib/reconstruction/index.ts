@@ -34,3 +34,43 @@ export {
   DEFAULT_FOOT_SURFACE_OPTIONS,
 } from "./footSurfaceMesh";
 export type { FootSurfaceOptions } from "./footSurfaceMesh";
+
+// ---------------------------------------------------------------------------
+// Base foot mesh + regions + deformation
+// ---------------------------------------------------------------------------
+
+export {
+  buildFootBaseGeometry,
+  DEFAULT_FOOT_BASE_GEOMETRY_OPTIONS,
+  DEFAULT_FOOT_PROPORTIONS,
+} from "./footBaseGeometry";
+export type {
+  FootProportions,
+  FootBaseGeometryOptions,
+} from "./footBaseGeometry";
+
+export {
+  classifyFootMeshRegions,
+  paintRegionColors,
+  describeRegions,
+  FOOT_REGION_IDS,
+  DEFAULT_REGION_THRESHOLDS,
+  REGION_DEBUG_COLORS,
+} from "./footMeshRegions";
+export type {
+  FootRegionId,
+  VertexGroup,
+  FootMeshRegions,
+  RegionThresholds,
+} from "./footMeshRegions";
+
+export {
+  applyRegionDeformations,
+  deformGeometryInPlace,
+  DEFORM_PRESETS,
+} from "./footMeshDeform";
+export type {
+  RegionDeformParams,
+  RegionDeformMap,
+  DeformOptions,
+} from "./footMeshDeform";
