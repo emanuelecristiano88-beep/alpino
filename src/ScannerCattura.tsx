@@ -4,7 +4,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { Canvas } from "@react-three/fiber";
 import FootCanvas from "../components/three/FootCanvas";
-import FootPointCloudPreview from "../components/three/FootPointCloudPreview";
+import FootTemplatePreview from "../components/three/FootTemplatePreview";
 import { Button } from "./components/ui/button";
 import { Checkbox } from "./components/ui/checkbox";
 import { Label } from "./components/ui/label";
@@ -1706,11 +1706,11 @@ export default function ScannerCattura() {
                                 powerPreference: "high-performance",
                               }}
                             >
-                              <ambientLight intensity={0.5} />
-                              <directionalLight intensity={1.15} position={[2.4, 3.5, 2.8]} />
-                              <FootPointCloudPreview
+                              <ambientLight intensity={0.45} />
+                              <directionalLight intensity={1.2} position={[2.4, 3.5, 2.8]} castShadow={false} />
+                              <directionalLight intensity={0.3} position={[-2.0, 1.5, -2.0]} />
+                              <FootTemplatePreview
                                 cloud={reconstructedCloud}
-                                introAnimation
                                 showVisualizationToggle
                                 heatmapAxis="y"
                               />

@@ -34,3 +34,10 @@ export {
   DEFAULT_FOOT_SURFACE_OPTIONS,
 } from "./footSurfaceMesh";
 export type { FootSurfaceOptions } from "./footSurfaceMesh";
+
+export {
+  extractFootMeasurements,
+  buildTemplateFootGeometry,
+  DEFAULT_FOOT_TEMPLATE_OPTIONS,
+} from "./footTemplate";
+export type { FootMeasurements, FootTemplateOptions } from "./footTemplate";
