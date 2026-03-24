@@ -34,3 +34,10 @@ export {
   DEFAULT_FOOT_SURFACE_OPTIONS,
 } from "./footSurfaceMesh";
 export type { FootSurfaceOptions } from "./footSurfaceMesh";
+
+export {
+  applyFootDeformation,
+  validateFootDeformationParams,
+  DEFAULT_FOOT_DEFORMATION_PARAMS,
+} from "./footDeformationParams";
+export type { FootDeformationParams, ToeType } from "./footDeformationParams";

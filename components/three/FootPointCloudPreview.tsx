@@ -12,6 +12,10 @@ import {
   type FootSurfaceOptions,
 } from "@/lib/reconstruction/footSurfaceMesh";
 import {
+  applyFootDeformation,
+  type FootDeformationParams,
+} from "@/lib/reconstruction/footDeformationParams";
+import {
   applyHeatmapToBufferGeometry,
   computeAxisRange,
   fillColorsFromAxisRange,
@@ -76,6 +80,8 @@ type Props = {
   pointSize?: number;
   showPointsDebug?: boolean;
   surfaceOptions?: Partial<FootSurfaceOptions>;
+  /** Foot shape deformation parameters (length/width/height scale, arch, volume, heel, toes). */
+  deformationParams?: Partial<FootDeformationParams>;
   autoRotateSpeed?: number;
   orbitMinDistance?: number;
   orbitMaxDistance?: number;
@@ -108,6 +114,7 @@ function FootPointCloudPreviewImpl({
   pointSize = 0.015,
   showPointsDebug = false,
   surfaceOptions,
+  deformationParams,
   autoRotateSpeed = DEFAULT_AUTO_ROTATE_SPEED,
   orbitMinDistance = 0.5,
   orbitMaxDistance = 4.2,
@@ -194,12 +201,13 @@ function FootPointCloudPreviewImpl({
       return;
     }
     const g = buildFootSurfaceFromPositions(scaledPositions, n, effectiveSurfaceOptions);
+    if (g && deformationParams) applyFootDeformation(g, deformationParams);
     setSurfaceGeometry(g);
     setIntroPhase("done");
     return () => {
-      g.dispose();
+      g?.dispose();
     };
-  }, [introAnimation, scaledPositions, n, effectiveSurfaceOptions]);
+  }, [introAnimation, scaledPositions, n, effectiveSurfaceOptions, deformationParams]);
 
   const pointsGeometry = useMemo(() => {
     const g = new THREE.BufferGeometry();
@@ -311,6 +319,7 @@ function FootPointCloudPreviewImpl({
       if (t >= 1 - 1e-5 && !convergeFinishedRef.current) {
         convergeFinishedRef.current = true;
         const g = buildFootSurfaceFromPositions(scaledPositions, n, effectiveSurfaceOptions);
+        if (g && deformationParams) applyFootDeformation(g, deformationParams);
         setSurfaceGeometry(g);
         setIntroPhase("fade");
       }
