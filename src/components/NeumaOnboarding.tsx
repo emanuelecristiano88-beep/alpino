@@ -180,6 +180,7 @@ export default function NeumaOnboarding({ open, onOpenChange, onComplete }: Neum
         className="max-h-[92dvh] max-w-lg overflow-y-auto border border-white/10 bg-zinc-950/95 p-5 text-white shadow-2xl backdrop-blur-md sm:p-6"
       >
         <DialogHeader className="space-y-3 text-left">
+          <DialogDescription className="sr-only">Completa la registrazione per iniziare la scansione del piede</DialogDescription>
           <div className="flex items-center justify-between gap-2">
             <DialogTitle className="text-xl font-semibold tracking-tight text-white">Onboarding NEUMA</DialogTitle>
             <span className="text-xs font-medium text-white/45">

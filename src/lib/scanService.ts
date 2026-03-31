@@ -61,3 +61,22 @@ export async function updateScan(
     console.error("[scanService] updateScan failed:", error.message);
   }
 }
+
+/**
+ * Uploads the full scan video as a single file.
+ * Returns the storage path (e.g. "scan_1710000000000.webm").
+ */
+export async function uploadFullScan(filename: string, blob: Blob): Promise<string> {
+  const { error } = await supabase.storage
+    .from(BUCKET)
+    .upload(filename, blob, {
+      contentType: blob.type || "video/webm",
+      upsert: false,
+    });
+
+  if (error) {
+    throw new Error(`[scanService] uploadFullScan "${filename}" failed: ${error.message}`);
+  }
+
+  return filename;
+}

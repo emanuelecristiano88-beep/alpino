@@ -31,7 +31,7 @@ import { FOOT_VIEW_ZONE_TO_PHASE } from "./lib/scanner/footViewZoneClassifier";
 import { sheetQuadCornersNormFromMarkerQuads } from "./lib/scanner/sheetQuadFromAruco";
 import { estimateFootBBoxOverlapFractionOnPolygon } from "./lib/scanner/footOnSheetOverlap";
 import { discardCameraStreamHandoff, takeCameraStreamHandoff } from "./lib/cameraStreamHandoff";
-import { createNewScan, uploadVideoChunk as supabaseUploadChunk } from "./lib/scanService";
+import { createNewScan, uploadVideoChunk as supabaseUploadChunk, uploadFullScan, updateScan } from "./lib/scanService";
 import type { FootId, Metrics } from "./types/scan";
 
 // Lazy-load 3D stack (R3F/three) to avoid crashing the live camera path on Android.
@@ -564,6 +564,15 @@ export default function ScannerCattura() {
   >("idle");
   const [hasLivePreview, setHasLivePreview] = useState(false);
 
+  // Debug: confirm video element is present in DOM after mount.
+  useEffect(() => {
+    if (videoRef.current) {
+      console.log("VIDEO_ELEMENT_MOUNTED", videoRef.current);
+    } else {
+      console.warn("VIDEO_ELEMENT_MOUNTED — ref is null on mount");
+    }
+  }, []);
+
   // Camera start: fire IMMEDIATELY on mount (same as TestCameraPage).
   // No state-gate — eliminates all React lifecycle timing issues on Android.
   const cameraStartedRef = useRef(false);
@@ -574,6 +583,7 @@ export default function ScannerCattura() {
     const start = async () => {
       if (cameraStartedRef.current) return;
       cameraStartedRef.current = true;
+      console.log("CAMERA_INIT_START");
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
           video: { facingMode: "environment" },
@@ -586,12 +596,22 @@ export default function ScannerCattura() {
         activeStream = stream;
         streamRef.current = stream;
 
-        const videoEl = document.getElementById("neuma-live-video") as HTMLVideoElement | null;
+        // Use React ref (set via ref={videoRef} on the element) — never getElementById
+        // which can race with React re-renders on Android.
+        const videoEl = videoRef.current;
         if (videoEl) {
-          videoRef.current = videoEl;
-          videoEl.srcObject = stream;
-          await videoEl.play();
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          (videoEl as any).srcObject = stream;
+          // Fire-and-forget play(): autoPlay+muted handles playback automatically.
+          // Awaiting play() causes AbortError on Android Chrome when autoPlay is also set,
+          // which silently prevents the video from showing (black screen).
+          videoEl.play().catch((e) => {
+            console.warn("[ScannerCattura] play() soft-failed (autoPlay handles it):", e);
+          });
+          console.log("CAMERA_INIT_SUCCESS");
           if (!cancelled) setHasLivePreview(true);
+        } else {
+          console.error("[ScannerCattura] videoRef.current is null — stream acquired but not attached");
         }
       } catch (e) {
         console.error("[ScannerCattura] camera start failed:", e);
@@ -632,11 +652,14 @@ export default function ScannerCattura() {
         audio: false,
       });
       streamRef.current = stream;
-      const videoEl = document.getElementById("neuma-live-video") as HTMLVideoElement | null;
+      const videoEl = videoRef.current;
       if (videoEl) {
-        videoRef.current = videoEl;
-        videoEl.srcObject = stream;
-        await videoEl.play();
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (videoEl as any).srcObject = stream;
+        // Fire-and-forget: autoPlay handles playback; awaiting can AbortError on Android
+        videoEl.play().catch((e) => {
+          console.warn("[ScannerCattura] restartCamera play() soft-failed:", e);
+        });
         setHasLivePreview(true);
         cameraStartedRef.current = true;
       }
@@ -653,7 +676,14 @@ export default function ScannerCattura() {
   const videoChunkIndexRef = useRef(0);
   const videoDriveFolderIdRef = useRef<string | null>(null);
   const videoUploadChainRef = useRef<Promise<void>>(Promise.resolve());
+  /** Accumulates MediaRecorder chunks locally; assembled into a single Blob at upload time. */
+  const videoChunksRef = useRef<Blob[]>([]);
   const [isVideoRecording, setIsVideoRecording] = useState(false);
+  const [videoUploadProgress, setVideoUploadProgress] = useState(0);
+  /** 0-100: stability countdown progress before auto-starting recording. */
+  const [stabilityPct, setStabilityPct] = useState(0);
+  const stableTimerRef = useRef<number | null>(null);
+  const stableStartRef = useRef<number>(0);
   const [showMotionBlurWarning, setShowMotionBlurWarning] = useState(false);
   const motionBlurScoreRef = useRef<number>(0);
   const blurCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -1014,17 +1044,71 @@ export default function ScannerCattura() {
     []
   );
 
-  const stopVideoRecording = useCallback(async () => {
-    const rec = mediaRecorderRef.current;
-    if (!rec) return;
-    try {
-      if (rec.state !== "inactive") rec.stop();
-    } catch {
-      /* noop */
-    }
-    mediaRecorderRef.current = null;
-    setIsVideoRecording(false);
+  const stopVideoRecording = useCallback((): Promise<void> => {
+    return new Promise((resolve) => {
+      const rec = mediaRecorderRef.current;
+      if (!rec || rec.state === "inactive") {
+        mediaRecorderRef.current = null;
+        setIsVideoRecording(false);
+        resolve();
+        return;
+      }
+      rec.onstop = () => resolve();
+      try {
+        rec.stop();
+      } catch {
+        resolve();
+      }
+      mediaRecorderRef.current = null;
+      setIsVideoRecording(false);
+    });
   }, []);
+
+  /**
+   * Assembles accumulated video chunks into a single Blob and uploads it to
+   * Supabase Storage ("raw-scans/scan_<timestamp>.webm").
+   * Updates the existing `scans` row (or creates a new one) with video_url +
+   * status "pending" so the Mac Python worker can pick it up.
+   */
+  const uploadFullScanVideo = useCallback(
+    async (onProgress: (p: number) => void): Promise<void> => {
+      const chunks = videoChunksRef.current;
+      if (!chunks.length) return;
+
+      const mimeType = "video/webm";
+      const blob = new Blob(chunks, { type: mimeType });
+      const filename = `scan_${Date.now()}.webm`;
+
+      // Simulated progress (Supabase JS client has no progress callback).
+      // Estimate: ~150 KB/s on a typical mobile connection.
+      const estimatedMs = Math.max(3000, blob.size / 150);
+      let fake = 0;
+      const ticker = setInterval(() => {
+        fake = Math.min(88, fake + (88 / (estimatedMs / 250)));
+        onProgress(Math.round(fake));
+      }, 250);
+
+      try {
+        await uploadFullScan(filename, blob);
+        clearInterval(ticker);
+        onProgress(97);
+
+        // Update the scan row created at session start, or create a fresh one.
+        const existingId = supabaseScanIdRef.current;
+        if (existingId) {
+          await updateScan(existingId, { video_url: filename, status: "pending" });
+        }
+
+        onProgress(100);
+        console.log("[ScannerCattura] video uploaded:", filename);
+      } catch (err) {
+        clearInterval(ticker);
+        console.error("[ScannerCattura] uploadFullScanVideo failed:", err);
+        throw err;
+      }
+    },
+    []
+  );
 
   const startVideoRecording = useCallback(() => {
     if (typeof window === "undefined") return;
@@ -1050,6 +1134,7 @@ export default function ScannerCattura() {
     videoStreamIdRef.current =
       typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `vs_${Date.now()}`;
     videoDriveFolderIdRef.current = null;
+    videoChunksRef.current = [];
     setShowMotionBlurWarning(false);
 
     const rec = new MediaRecorder(stream, {
@@ -1062,13 +1147,9 @@ export default function ScannerCattura() {
 
     rec.ondataavailable = (ev: BlobEvent) => {
       const blob = ev.data;
-      if (!blob || blob.size < 1024) return;
-      const idx = videoChunkIndexRef.current++;
-      videoUploadChainRef.current = videoUploadChainRef.current
-        .then(() => uploadVideoChunk(blob, idx))
-        .catch((e) => {
-          console.error("[ScannerCattura] video chunk upload", e);
-        });
+      if (!blob || blob.size < 512) return;
+      videoChunksRef.current.push(blob);
+      videoChunkIndexRef.current++;
     };
     rec.onerror = (e) => {
       console.error("[ScannerCattura] MediaRecorder error", e);
@@ -1076,14 +1157,58 @@ export default function ScannerCattura() {
     rec.start(1200); // timeslice: chunk ~1.2s
   }, [uploadVideoChunk]);
 
+  // Stop recording when leaving readyPhase; starting is handled by the stability timer below.
   useEffect(() => {
-    if (cameraState === "readyPhase") {
-      // Avvia registrazione continua (video professionale) quando la camera è pronta.
-      startVideoRecording();
+    if (cameraState !== "readyPhase") {
+      void stopVideoRecording();
+      if (stableTimerRef.current) {
+        clearInterval(stableTimerRef.current);
+        stableTimerRef.current = null;
+      }
+      setStabilityPct(0);
+    }
+  }, [cameraState, stopVideoRecording]);
+
+  // Auto-start: begin recording only after 2s of stable alignment (sheet + foot + green readiness).
+  useEffect(() => {
+    const stable =
+      cameraState === "readyPhase" &&
+      captureReadiness === "green" &&
+      footDetected &&
+      sheetDetectionState === "green" &&
+      !isVideoRecording;
+
+    if (!stable) {
+      if (stableTimerRef.current) {
+        clearInterval(stableTimerRef.current);
+        stableTimerRef.current = null;
+      }
+      setStabilityPct(0);
       return;
     }
-    void stopVideoRecording();
-  }, [cameraState, startVideoRecording, stopVideoRecording]);
+
+    if (stableTimerRef.current) return; // already counting down
+
+    stableStartRef.current = performance.now();
+    stableTimerRef.current = window.setInterval(() => {
+      const elapsed = performance.now() - stableStartRef.current;
+      const pct = Math.min(100, (elapsed / 2000) * 100);
+      setStabilityPct(pct);
+      if (pct >= 100) {
+        clearInterval(stableTimerRef.current!);
+        stableTimerRef.current = null;
+        setStabilityPct(0);
+        startVideoRecording();
+      }
+    }, 80);
+
+    return () => {
+      if (stableTimerRef.current) {
+        clearInterval(stableTimerRef.current);
+        stableTimerRef.current = null;
+      }
+    };
+  }, [cameraState, captureReadiness, footDetected, sheetDetectionState, isVideoRecording, startVideoRecording]);
 
   useEffect(() => {
     if (!isVideoRecording) return;
@@ -1532,6 +1657,32 @@ export default function ScannerCattura() {
 
   const beginnerNudgeActive = tooSlow && !footScanCoverageComplete;
 
+  /** Next uncaptured bin clockwise from current angle — drives the guide orb. */
+  const nextMissingBin = useMemo(() => {
+    if (!beginnerNudgeActive || footScanCoverageComplete) return null;
+    const total = orbitBinsTarget;
+    const currentBin =
+      liveOrbitAngleDeg != null
+        ? Math.floor(((((liveOrbitAngleDeg % 360) + 360) % 360) / 360) * total)
+        : 0;
+    for (let i = 0; i < total; i++) {
+      const bin = (currentBin + i) % total;
+      if (!footScanCoverageBins.has(bin)) return bin;
+    }
+    return null;
+  }, [beginnerNudgeActive, footScanCoverageComplete, orbitBinsTarget, liveOrbitAngleDeg, footScanCoverageBins]);
+
+  /** Sheet distance — drives ring colour and warning text. */
+  const sheetDistanceWarning = useMemo((): "too_close" | "too_far" | null => {
+    if (cameraState !== "readyPhase") return null;
+    if (alignment.guide === "too_close") return "too_close";
+    if (alignment.tracking.confidence >= 0.12) {
+      if (alignment.tracking.scale > A4_TRACKING_SCALE_MAX) return "too_close";
+      if (alignment.tracking.scale < A4_TRACKING_SCALE_MIN) return "too_far";
+    }
+    return null;
+  }, [cameraState, alignment.guide, alignment.tracking.confidence, alignment.tracking.scale]);
+
   /** UX premium: feedback binario (verde=ok, rosso=correggi) */
   const scanBinaryOk = useMemo(() => captureReadiness === "green", [captureReadiness]);
 
@@ -1612,18 +1763,16 @@ export default function ScannerCattura() {
   const scanFeedbackOverlayBackground = useMemo(() => {
     if (!scanOverlayEnabled) return "transparent";
     const base =
-      "radial-gradient(circle at 50% 50%, rgba(0,0,0,0) 22%, rgba(0,0,0,0.14) 62%, rgba(0,0,0,0.26) 100%)";
+      "radial-gradient(circle at 50% 50%, rgba(0,0,0,0) 22%, rgba(0,0,0,0.10) 65%, rgba(0,0,0,0.20) 100%)";
     if (scanBinaryOk) {
-      return `${base}, radial-gradient(circle at 50% 48%, rgba(52,211,153,0.28) 0%, rgba(16,185,129,0.07) 42%, transparent 58%)`;
+      return `${base}, radial-gradient(circle at 50% 48%, rgba(52,211,153,0.10) 0%, transparent 52%)`;
     }
-    return `${base}, radial-gradient(ellipse 88% 74% at 50% 48%, rgba(248,113,113,0.22) 0%, transparent 68%)`;
+    return base;
   }, [scanOverlayEnabled, scanBinaryOk]);
 
   const scanFeedbackOverlayShadow = useMemo(() => {
-    if (!scanOverlayEnabled) return undefined;
-    return scanBinaryOk
-      ? "inset 0 0 100px rgba(52,211,153,0.18)"
-      : "inset 0 0 100px rgba(248,113,113,0.12)";
+    if (!scanOverlayEnabled || !scanBinaryOk) return undefined;
+    return "inset 0 0 80px rgba(52,211,153,0.10)";
   }, [scanOverlayEnabled, scanBinaryOk]);
 
   const reconPhotosPerPhase = useMemo(() => {
@@ -2370,9 +2519,24 @@ export default function ScannerCattura() {
     };
 
     // Prefer requestVideoFrameCallback when available (Chrome Android supports it on many devices).
+    // CRITICAL: guard against null ref — watchdog can fire before React commits the video element.
     const v = videoRef.current;
-    const rvfc = (v as HTMLVideoElement & { requestVideoFrameCallback?: (cb: (now: number, meta: any) => void) => number })
-      .requestVideoFrameCallback;
+    if (!v) {
+      // Video element not yet in DOM — fall back to interval-only polling.
+      const id = window.setInterval(() => {
+        if (cancelled) return;
+        checkByTimeAdvance();
+      }, 220);
+      return () => {
+        cancelled = true;
+        window.clearInterval(id);
+      };
+    }
+
+    // Bind properly so `this` context is correct when called
+    const rvfc = (v as any).requestVideoFrameCallback?.bind(v) as
+      | ((cb: (now: number, meta: unknown) => void) => number)
+      | undefined;
     let rvfcHandle = 0;
     const onFrame = () => {
       if (cancelled) return;
@@ -2396,7 +2560,7 @@ export default function ScannerCattura() {
       window.clearInterval(id);
       if (rvfc && rvfcHandle) {
         try {
-          (videoRef.current as any)?.cancelVideoFrameCallback?.(rvfcHandle);
+          (v as any).cancelVideoFrameCallback?.(rvfcHandle);
         } catch {
           /* ignore */
         }
@@ -2509,12 +2673,10 @@ export default function ScannerCattura() {
         prepareVideoElement(v);
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         (v as any).srcObject = stream;
-        try {
-          await v.play();
-        } catch {
-          /* ensureCameraReady retries */
-        }
-        await ensureCameraReady();
+        // Fire-and-forget: autoPlay handles playback; awaiting play() causes AbortError on Android
+        v.play().catch((e) => {
+          console.warn("[ScannerCattura] forceOpenCamera play() soft-failed:", e);
+        });
         if (preferredFoot) {
           setCurrentFoot(preferredFoot);
           currentFootRef.current = preferredFoot;
@@ -2669,7 +2831,7 @@ export default function ScannerCattura() {
             else setOrbitCompleteRight(true);
             if ("vibrate" in navigator) navigator.vibrate([100, 50, 100]);
           } else {
-            if ("vibrate" in navigator) navigator.vibrate(50);
+            if ("vibrate" in navigator) navigator.vibrate(12);
           }
           return next;
         });
@@ -2843,10 +3005,22 @@ export default function ScannerCattura() {
     setCameraState("uploading");
     setError("");
     setProcessingProgress(0);
+    setVideoUploadProgress(0);
     setProcessingScanId(null);
     setProcessingReady(false);
     setScanPath("");
     stopProcessing();
+
+    // Ensure recording is fully stopped and final chunk flushed before assembling.
+    await stopVideoRecording();
+
+    // Upload full video to Supabase Storage + mark scans row as pending.
+    try {
+      await uploadFullScanVideo((p) => setVideoUploadProgress(p));
+    } catch (err) {
+      console.warn("[ScannerCattura] video upload failed (non-fatal, continuing):", err);
+      setVideoUploadProgress(0);
+    }
 
     try {
       const secret = import.meta.env.VITE_UPLOAD_API_SECRET as string | undefined;
@@ -3121,6 +3295,7 @@ export default function ScannerCattura() {
           }}
         >
           <video
+            ref={videoRef}
             id="neuma-live-video"
             autoPlay
             playsInline
@@ -3152,49 +3327,33 @@ export default function ScannerCattura() {
 
       {/* Black camera fallback: force a user gesture */}
       {!NO_SCANNER_OVERLAYS && cameraState === "readyPhase" && !hasLivePreview ? (
-        <div className="pointer-events-auto absolute inset-0 z-[92] flex items-center justify-center px-6">
-          <div className="w-full max-w-md rounded-2xl border border-white/12 bg-black/45 p-6 text-center backdrop-blur-md">
-            <div className="neuma-title text-xl font-semibold tracking-tight text-white">
+        <div className="pointer-events-auto absolute inset-x-0 bottom-0 z-[92] flex justify-center px-5 pb-[max(2rem,env(safe-area-inset-bottom))]">
+          <div className="w-full max-w-sm rounded-3xl border border-white/10 bg-white/[0.03] px-5 py-6 text-center backdrop-blur-2xl">
+            <p className="text-base font-semibold tracking-tight text-white">
               Attiva la fotocamera
-            </div>
-            <div className="mt-2 text-sm text-white/70">
-              Su alcuni dispositivi serve un tap per mostrare l’anteprima.
-            </div>
-            <div className="mt-2 font-mono text-[10px] uppercase tracking-[0.14em] text-white/45">
-              build {BUILD_TAG}
-            </div>
-            <div className="mt-5 flex flex-col gap-3">
+            </p>
+            <p className="mt-1.5 text-[13px] text-white/55">
+              Tocca per sbloccare l&apos;anteprima.
+            </p>
+            <div className="mt-5 flex flex-col gap-2.5">
               <Button
                 type="button"
                 variant="secondary"
                 onClick={async () => {
                   await forceOpenCameraFromGesture(currentFootRef.current ?? "LEFT");
                 }}
-                className="w-full rounded-full border border-white/25 bg-white/15 py-6 text-sm font-semibold text-white hover:bg-white/20"
+                className="w-full rounded-full border border-white/22 bg-white/12 py-5 text-sm font-semibold text-white hover:bg-white/18"
               >
                 Avvia fotocamera
               </Button>
               {cameraOverlayError ? (
-                <div className="rounded-xl border border-white/10 bg-black/35 px-3 py-2 text-left text-[11px] text-white/70">
-                  <div className="font-mono text-[10px] uppercase tracking-[0.14em] text-white/55">
-                    Dettagli
-                  </div>
-                  <div className="mt-1 break-words font-mono">{cameraOverlayError}</div>
-                </div>
+                <p className="px-1 text-[11px] text-white/35">{cameraOverlayError}</p>
               ) : null}
-              <div className="rounded-xl border border-white/10 bg-black/35 px-3 py-2 text-left text-[11px] text-white/65">
-                <div className="font-mono text-[10px] uppercase tracking-[0.14em] text-white/55">
-                  Diagnostica
-                </div>
-                <pre className="mt-1 whitespace-pre-wrap break-words font-mono">
-                  {cameraOverlayDiagnostics || "…"}
-                </pre>
-              </div>
               <Button
                 type="button"
                 variant="outline"
                 onClick={resetTotal}
-                className="w-full rounded-full border-white/15 bg-white/[0.04] py-5 text-sm font-semibold text-white/90 hover:bg-white/[0.07]"
+                className="w-full rounded-full border-white/10 bg-white/[0.03] py-4 text-sm font-semibold text-white/55 hover:bg-white/[0.06]"
               >
                 Esci
               </Button>
@@ -3215,65 +3374,228 @@ export default function ScannerCattura() {
         />
       ) : null}
 
-      {/* Mirino + progresso 360° (overlay professionale) */}
-      {!NO_SCANNER_OVERLAYS && cameraState === "readyPhase" ? (
-        <div className="pointer-events-none absolute left-1/2 top-1/2 z-[60] -translate-x-1/2 -translate-y-1/2">
-          {(() => {
-            const r = 74;
-            const c = 2 * Math.PI * r;
-            const p = Math.max(0, Math.min(1, scanCaptureCoverageProgress));
-            const dash = c * p;
-            return (
-              <div className="relative h-[190px] w-[190px]">
-                <svg className="absolute inset-0 h-full w-full" viewBox="0 0 200 200" aria-hidden>
-                  <defs>
-                    <radialGradient id="neumaReticleGlow" cx="50%" cy="50%" r="60%">
-                      <stop offset="0%" stopColor="rgba(0,0,0,0)" />
-                      <stop offset="55%" stopColor="rgba(0,0,0,0)" />
-                      <stop offset="100%" stopColor="rgba(0,0,0,0.18)" />
-                    </radialGradient>
-                  </defs>
-                  <circle cx="100" cy="100" r="94" fill="url(#neumaReticleGlow)" />
-                  <circle cx="100" cy="100" r="74" fill="none" stroke="rgba(255,255,255,0.18)" strokeWidth="2.5" />
-                  <circle
-                    cx="100"
-                    cy="100"
-                    r="74"
-                    fill="none"
-                    stroke="rgba(52,211,153,0.9)"
-                    strokeWidth="4.2"
-                    strokeLinecap="round"
-                    strokeDasharray={`${dash} ${c - dash}`}
-                    transform="rotate(-90 100 100)"
-                    style={{
-                      filter: footDetected ? "drop-shadow(0 0 10px rgba(52,211,153,0.35))" : "none",
-                      opacity: footDetected ? 1 : 0.55,
-                      transition: "opacity 180ms ease-out",
-                    }}
-                  />
-                  {/* crosshair */}
-                  <line x1="100" y1="18" x2="100" y2="34" stroke="rgba(255,255,255,0.25)" strokeWidth="2" />
-                  <line x1="100" y1="166" x2="100" y2="182" stroke="rgba(255,255,255,0.25)" strokeWidth="2" />
-                  <line x1="18" y1="100" x2="34" y2="100" stroke="rgba(255,255,255,0.25)" strokeWidth="2" />
-                  <line x1="166" y1="100" x2="182" y2="100" stroke="rgba(255,255,255,0.25)" strokeWidth="2" />
-                  <circle cx="100" cy="100" r="3.5" fill="rgba(255,255,255,0.28)" />
-                </svg>
-                {isVideoRecording ? (
-                  <div className="absolute left-1/2 top-[62%] -translate-x-1/2 rounded-full border border-white/15 bg-black/40 px-3 py-1 text-[10px] font-semibold tracking-[0.18em] text-white/80 backdrop-blur-[2px]">
-                    REC
-                  </div>
-                ) : null}
-              </div>
-            );
-          })()}
+      {/* ── Ghost foot guide — dashed cyan silhouette, fades when foot is detected ── */}
+      {scanOverlayEnabled && sheetDetectionState === "green" && !footScanCoverageComplete ? (
+        <div
+          className="pointer-events-none absolute left-1/2 top-1/2 z-[52] -translate-x-1/2 -translate-y-[54%]"
+          style={{
+            opacity: footDetected ? 0.12 : 0.52,
+            transition: "opacity 700ms ease-out",
+          }}
+          aria-hidden
+        >
+          <svg
+            width="84" height="140" viewBox="0 0 84 140" fill="none"
+            style={{ transform: currentFoot === "RIGHT" ? "scaleX(-1)" : "none" }}
+          >
+            {/* Main foot body */}
+            <path
+              d="M42 128 C26 128 15 117 13 103 C11 90 13 74 17 62 C21 50 25 40 31 30 C35 22 38 16 42 15 C46 15 49 22 53 30 C59 40 63 50 67 62 C71 74 73 90 71 103 C69 117 58 128 42 128 Z"
+              stroke="rgba(34,211,238,0.58)"
+              strokeWidth="1.5"
+              strokeDasharray="5 3"
+              fill="rgba(34,211,238,0.04)"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+            {/* Big toe */}
+            <ellipse cx="23" cy="18" rx="7" ry="10" stroke="rgba(34,211,238,0.44)" strokeWidth="1.2" strokeDasharray="3 2.5" fill="none" />
+            {/* 2nd toe */}
+            <ellipse cx="33" cy="11" rx="6" ry="9" stroke="rgba(34,211,238,0.42)" strokeWidth="1.2" strokeDasharray="3 2.5" fill="none" />
+            {/* 3rd toe */}
+            <ellipse cx="43" cy="8" rx="5.5" ry="8.5" stroke="rgba(34,211,238,0.40)" strokeWidth="1.2" strokeDasharray="3 2.5" fill="none" />
+            {/* 4th toe */}
+            <ellipse cx="53" cy="11" rx="5" ry="8" stroke="rgba(34,211,238,0.38)" strokeWidth="1.2" strokeDasharray="3 2.5" fill="none" />
+            {/* Pinky */}
+            <ellipse cx="62" cy="18" rx="4.5" ry="7.5" stroke="rgba(34,211,238,0.34)" strokeWidth="1.2" strokeDasharray="3 2.5" fill="none" />
+          </svg>
         </div>
       ) : null}
 
-      {/* Feedback AI: Motion Blur */}
+      {/* ── Center reticle: 36-segment compass ring + guide orb ── */}
+      {!NO_SCANNER_OVERLAYS && cameraState === "readyPhase" ? (
+        <div className="pointer-events-none absolute left-1/2 top-1/2 z-[60] flex -translate-x-1/2 -translate-y-1/2 flex-col items-center">
+          <div className="relative h-[200px] w-[200px]">
+            <svg className="absolute inset-0 h-full w-full" viewBox="0 0 200 200" aria-hidden>
+              <defs>
+                <style>{`
+                  @keyframes neumaRingPulse {
+                    0%,100% { opacity: 0.28; }
+                    50%     { opacity: 0.85; }
+                  }
+                  .neuma-dist-seg { animation: neumaRingPulse 1.1s ease-in-out infinite; }
+                  @keyframes neumaOrbBeat {
+                    0%,100% { opacity: 0.70; r: 4; }
+                    50%     { opacity: 1.00; r: 5.5; }
+                  }
+                  .neuma-orb { animation: neumaOrbBeat 0.85s ease-in-out infinite; }
+                `}</style>
+              </defs>
+
+              {/* Stability ring — cyan arc outside segments, fills 0→100% over 2s */}
+              {stabilityPct > 0 ? (() => {
+                const rs = 82;
+                const cs = 2 * Math.PI * rs;
+                const ds = cs * (stabilityPct / 100);
+                return (
+                  <circle
+                    cx="100" cy="100" r={rs} fill="none"
+                    stroke="rgba(34,211,238,0.72)"
+                    strokeWidth="2.2"
+                    strokeLinecap="round"
+                    strokeDasharray={`${ds} ${cs - ds}`}
+                    transform="rotate(-90 100 100)"
+                    style={{ filter: "drop-shadow(0 0 6px rgba(34,211,238,0.65))" }}
+                  />
+                );
+              })() : null}
+
+              {/* 36 wedge segments — cyan when aligned + recording, emerald when captured */}
+              {Array.from({ length: orbitBinsTarget }, (_, i) => {
+                const isCaptured = footScanCoverageBins.has(i);
+                const isGuide = i === nextMissingBin;
+                const degPerSeg = 360 / orbitBinsTarget;
+                const gapDeg = 2;
+                const t0 = coverageDegToRad(i * degPerSeg + gapDeg / 2);
+                const t1 = coverageDegToRad((i + 1) * degPerSeg - gapDeg / 2);
+                const d = donutWedgePath(100, 100, 67, 76, t0, t1);
+                if (isGuide) {
+                  return (
+                    <path
+                      key={i} d={d}
+                      fill="rgba(251,191,36,0.90)"
+                      style={{ filter: "drop-shadow(0 0 5px rgba(251,191,36,0.78))" }}
+                    />
+                  );
+                }
+                if (isCaptured) {
+                  return (
+                    <path
+                      key={i} d={d}
+                      fill="rgba(34,211,238,0.88)"
+                      style={{ filter: "drop-shadow(0 0 4px rgba(34,211,238,0.62))" }}
+                    />
+                  );
+                }
+                return (
+                  <path
+                    key={i} d={d}
+                    fill={sheetDistanceWarning ? "rgba(239,68,68,0.30)" : isVideoRecording && captureReadiness === "green" ? "rgba(34,211,238,0.12)" : "rgba(255,255,255,0.10)"}
+                    className={sheetDistanceWarning ? "neuma-dist-seg" : undefined}
+                    style={sheetDistanceWarning ? { animationDelay: `${(i / orbitBinsTarget) * 0.4}s` } : undefined}
+                  />
+                );
+              })}
+
+              {/* Guide orb — bright golden dot at next missing segment */}
+              {nextMissingBin != null ? (() => {
+                const degPerSeg = 360 / orbitBinsTarget;
+                const mid = coverageDegToRad((nextMissingBin + 0.5) * degPerSeg);
+                const r = 71.5;
+                return (
+                  <circle
+                    cx={100 + r * Math.cos(mid)}
+                    cy={100 + r * Math.sin(mid)}
+                    r="4"
+                    fill="rgba(251,191,36,0.96)"
+                    className="neuma-orb"
+                    style={{ filter: "drop-shadow(0 0 8px rgba(251,191,36,0.88))" }}
+                  />
+                );
+              })() : null}
+
+              {/* Cardinal tick marks */}
+              {(["11,100,21,100", "179,100,189,100", "100,11,100,21", "100,179,100,189"] as const).map((seg, i) => {
+                const [x1, y1, x2, y2] = seg.split(",").map(Number);
+                return (
+                  <line key={i} x1={x1} y1={y1} x2={x2} y2={y2}
+                    stroke={isVideoRecording && captureReadiness === "green" ? "rgba(34,211,238,0.30)" : "rgba(255,255,255,0.18)"}
+                    strokeWidth="1.5" strokeLinecap="round"
+                  />
+                );
+              })}
+              {/* Centre dot — pulses cyan when recording + aligned */}
+              <circle
+                cx="100" cy="100" r="2.5"
+                fill={isVideoRecording && captureReadiness === "green" ? "rgba(34,211,238,0.75)" : "rgba(255,255,255,0.25)"}
+                style={isVideoRecording && captureReadiness === "green"
+                  ? { filter: "drop-shadow(0 0 5px rgba(34,211,238,0.70))" }
+                  : undefined}
+              />
+            </svg>
+
+            {/* Recording status — shown inside ring bottom */}
+            <div className="absolute left-1/2 top-[66%] -translate-x-1/2">
+              <AnimatePresence mode="wait">
+                {stabilityPct > 0 && !isVideoRecording ? (
+                  <motion.div
+                    key="countdown"
+                    initial={{ opacity: 0, scale: 0.92 }}
+                    animate={{ opacity: 1, scale: 1 }}
+                    exit={{ opacity: 0 }}
+                    transition={{ duration: 0.2 }}
+                    className="rounded-full border border-cyan-400/25 bg-black/25 px-2.5 py-0.5 text-[9px] font-semibold tracking-[0.16em] text-cyan-300/80 backdrop-blur-sm"
+                  >
+                    {Math.ceil(2 - (stabilityPct / 100) * 2)}s
+                  </motion.div>
+                ) : isVideoRecording ? (
+                  <motion.div
+                    key="rec"
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    exit={{ opacity: 0 }}
+                    transition={{ duration: 0.2 }}
+                    className="flex items-center gap-1 rounded-full border border-cyan-400/20 bg-black/25 px-2.5 py-0.5 backdrop-blur-sm"
+                  >
+                    <span className="h-1.5 w-1.5 rounded-full bg-cyan-400/80" style={{ animation: "neumaOrbBeat 1s ease-in-out infinite" }} />
+                    <span className="text-[9px] font-semibold tracking-[0.16em] text-cyan-300/75">REC</span>
+                  </motion.div>
+                ) : null}
+              </AnimatePresence>
+            </div>
+          </div>
+
+          {/* Sub-ring text: distance warning or nudge */}
+          <div className="mt-1 h-7 flex items-center justify-center">
+            <AnimatePresence mode="wait">
+              {sheetDistanceWarning ? (
+                <motion.div
+                  key={sheetDistanceWarning}
+                  initial={{ opacity: 0, y: 4 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0 }}
+                  transition={{ duration: 0.25 }}
+                >
+                  <div
+                    className="rounded-full border border-white/[0.08] bg-white/[0.03] px-3 py-0.5 text-[11px] font-medium backdrop-blur-2xl"
+                    style={{ color: sheetDistanceWarning === "too_close" ? "rgba(252,165,165,0.88)" : "rgba(253,224,71,0.82)" }}
+                  >
+                    {sheetDistanceWarning === "too_close" ? "Allontanati" : "Avvicinati"}
+                  </div>
+                </motion.div>
+              ) : beginnerNudgeActive ? (
+                <motion.div
+                  key="nudge"
+                  initial={{ opacity: 0, y: 4 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0 }}
+                  transition={{ duration: 0.25 }}
+                >
+                  <div className="rounded-full border border-white/[0.08] bg-white/[0.03] px-3 py-0.5 text-[11px] font-medium text-white/42 backdrop-blur-2xl">
+                    Continua a girare lentamente
+                  </div>
+                </motion.div>
+              ) : null}
+            </AnimatePresence>
+          </div>
+        </div>
+      ) : null}
+
+      {/* Motion blur nudge — minimal, non-blocking */}
       {!NO_SCANNER_OVERLAYS && cameraState === "readyPhase" && showMotionBlurWarning ? (
-        <div className="pointer-events-none absolute left-1/2 top-[64%] z-[70] w-[min(92vw,26rem)] -translate-x-1/2 px-4">
-          <div className="rounded-2xl border border-amber-200/25 bg-amber-500/10 px-4 py-3 text-center text-sm font-semibold text-amber-100 shadow-[0_20px_70px_rgba(0,0,0,0.45)] backdrop-blur-[2px]">
-            Rallenta per una scansione migliore
+        <div className="pointer-events-none absolute bottom-[12%] left-1/2 z-[70] -translate-x-1/2 px-5">
+          <div className="rounded-full border border-amber-300/12 bg-white/[0.03] px-4 py-1.5 text-[12px] font-medium text-amber-100/60 backdrop-blur-2xl">
+            Rallenta leggermente
           </div>
         </div>
       ) : null}
@@ -3303,61 +3625,67 @@ export default function ScannerCattura() {
         )}
       </AnimatePresence>
 
-      {scanOverlayEnabled ? (
-        <div className="pointer-events-none absolute left-1/2 top-[9.5%] z-[95] mt-0.5 -translate-x-1/2 transition-[opacity,transform] duration-500 ease-out motion-reduce:transition-none" aria-live="polite">
-          <div className="flex flex-col items-center gap-2">
-            <div className="rounded-full border border-white/18 bg-black/35 px-3 py-1 text-xs font-semibold tracking-[0.12em] text-white/85 shadow-sm backdrop-blur-[2px] transition-[border-color,background-color,box-shadow] duration-500 ease-out motion-reduce:transition-none">
-              {feetProgressLabel}
-            </div>
-            <div
-              className={cn(
-                "rounded-full border px-4 py-1.5 text-sm font-medium tracking-[0.01em] shadow-sm backdrop-blur-[2px] transition-[border-color,background-color,color,box-shadow] duration-500 ease-out motion-reduce:transition-none",
-                sheetDetectionState === "green"
-                  ? "border-emerald-300/45 bg-emerald-500/10 text-emerald-100"
-                  : sheetDetectionState === "yellow"
-                    ? "border-amber-300/40 bg-amber-500/10 text-amber-100"
-                    : "border-rose-300/38 bg-rose-500/10 text-rose-100"
-              )}
-            >
-              {sheetStatusText}
-            </div>
-            {sheetPositionGuidanceText ? (
-              <div className="max-w-[min(92vw,20rem)] rounded-xl border border-white/20 bg-black/40 px-3 py-2 text-center text-sm font-semibold tracking-[0.02em] text-white shadow-lg backdrop-blur-[2px]">
-                {sheetPositionGuidanceText}
-              </div>
-            ) : null}
-          </div>
-        </div>
-      ) : null}
+      {/* ── Floating instruction — real-time, Apple-style ── */}
+      {scanOverlayEnabled ? (() => {
+        // Compute a single instruction key + content in priority order.
+        type Pill = { key: string; text: string; icon?: "check" | null; color: "emerald" | "amber" | "rose" | "neutral" };
+        const pill: Pill = (() => {
+          if (footScanCoverageComplete)
+            return { key: "done", text: "Perfetto!", icon: "check", color: "emerald" };
+          if (sheetDistanceWarning === "too_close")
+            return { key: "too_close", text: "Allontanati leggermente", color: "rose" };
+          if (sheetDistanceWarning === "too_far")
+            return { key: "too_far", text: "Avvicinati al foglio", color: "amber" };
+          if (sheetDetectionState === "green" && footDetected && captureReadiness === "green")
+            return { key: "scan_ok", text: "Perfetto, ora ruota lentamente", color: "emerald" };
+          if (sheetDetectionState === "green" && footDetected)
+            return { key: "scanning", text: "Gira lentamente intorno al piede", color: "neutral" };
+          if (sheetDetectionState === "green" && !footDetected)
+            return { key: "no_foot", text: "Posiziona il piede sul foglio", color: "neutral" };
+          if (sheetDetectionState === "yellow")
+            return { key: "yellow", text: "Quasi a posto", color: "amber" };
+          return { key: "align", text: "Inquadra il foglio A4", color: "neutral" };
+        })();
 
-      {scanOverlayEnabled && captureReadiness === "green" ? (
-        <div
-          className="pointer-events-none absolute left-1/2 top-[19%] z-[96] w-[min(92vw,20rem)] -translate-x-1/2 px-3"
-          aria-live="polite"
-        >
-          <div className="rounded-2xl border-2 border-emerald-300/60 bg-emerald-950/40 px-4 py-2.5 text-center text-base font-bold tracking-tight text-emerald-50 shadow-lg backdrop-blur-md sm:text-lg">
-            Scansione OK
-          </div>
-        </div>
-      ) : null}
+        const borderColor = {
+          emerald: "border-emerald-400/22",
+          amber:   "border-amber-300/20",
+          rose:    "border-rose-400/20",
+          neutral: "border-white/[0.08]",
+        }[pill.color];
+        const textColor = {
+          emerald: "text-emerald-100",
+          amber:   "text-amber-100/85",
+          rose:    "text-rose-200/85",
+          neutral: "text-white/68",
+        }[pill.color];
 
-      {scanOverlayEnabled && scanInstantCorrection ? (
-        <div
-          className="pointer-events-none absolute left-1/2 top-[19%] z-[96] w-[min(92vw,22rem)] -translate-x-1/2 px-3"
-          aria-live="assertive"
-        >
+        return (
           <div
-            className={cn(
-              "rounded-2xl border-2 px-4 py-3 text-center text-base font-bold leading-snug shadow-lg backdrop-blur-md sm:text-lg",
-              captureReadiness === "red"
-                ? "border-rose-300/70 bg-rose-950/55 text-rose-50"
-                : "border-amber-300/65 bg-amber-950/50 text-amber-50"
-            )}
+            className="pointer-events-none absolute left-1/2 top-0 z-[95] flex w-full -translate-x-1/2 justify-center px-5 pt-[max(1rem,env(safe-area-inset-top))]"
+            aria-live="polite"
           >
-            {scanInstantCorrection}
+            <AnimatePresence mode="wait">
+              <motion.div
+                key={pill.key}
+                initial={{ opacity: 0, y: -6, scale: 0.97 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={{ opacity: 0, y: -4 }}
+                transition={{ duration: 0.28, ease: "easeOut" }}
+              >
+                <div className={`flex items-center gap-2 rounded-full border ${borderColor} bg-white/[0.03] px-4 py-2 backdrop-blur-2xl`}>
+                  {pill.icon === "check" && (
+                    <svg width="13" height="13" viewBox="0 0 13 13" fill="none" aria-hidden>
+                      <path d="M1.5 7L5 10.5L11.5 3" stroke="#6ee7b7" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                    </svg>
+                  )}
+                  <span className={`text-[13px] font-medium ${textColor}`}>{pill.text}</span>
+                </div>
+              </motion.div>
+            </AnimatePresence>
           </div>
-        </div>
-      ) : null}
+        );
+      })() : null}
 
       {scanOverlayEnabled ? (
         <div
@@ -3410,13 +3738,9 @@ export default function ScannerCattura() {
             style={{
               background: (() => {
                 const base =
-                  "radial-gradient(circle at 50% 50%, rgba(0,0,0,0) 28%, rgba(0,0,0,0.12) 68%, rgba(0,0,0,0.24) 100%)";
-                if (captureReadiness === "red")
-                  return `${base}, radial-gradient(circle at 50% 45%, rgba(248,113,113,0.14) 0%, transparent 55%)`;
-                if (captureReadiness === "yellow")
-                  return `${base}, radial-gradient(circle at 50% 45%, rgba(251,191,36,0.12) 0%, transparent 55%)`;
+                  "radial-gradient(circle at 50% 50%, rgba(0,0,0,0) 28%, rgba(0,0,0,0.08) 68%, rgba(0,0,0,0.18) 100%)";
                 if (captureReadiness === "green")
-                  return `${base}, radial-gradient(circle at 50% 45%, rgba(52,211,153,0.13) 0%, transparent 55%)`;
+                  return `${base}, radial-gradient(circle at 50% 45%, rgba(52,211,153,0.07) 0%, transparent 52%)`;
                 return base;
               })(),
             }}
@@ -3450,162 +3774,54 @@ export default function ScannerCattura() {
       <motion.div
         className="absolute inset-0 z-50"
       >
-        {cameraState === "readyPhase" && (
-          <div className="pointer-events-none absolute bottom-[4.2rem] left-1/2 z-[58] w-[min(90vw,520px)] -translate-x-1/2 px-3 sm:bottom-[4.9rem]">
-            {/* Beginner animation: phone moving around the foot (2D, circular orbit). */}
-            <div className="mx-auto mb-4 flex w-full flex-col items-center justify-center transition-opacity duration-500 ease-out motion-reduce:transition-none">
-              <div
-                className={cn(
-                  "relative h-[5.5rem] w-[5.5rem] transition-[transform,filter] duration-500 ease-out motion-reduce:transition-none",
-                  footDetected && scanOverlayEnabled && "neuma-orbit-premium-pulse"
-                )}
-              >
-                <ScanCoverageSegmentRing
-                  segmentCount={orbitBinsTarget}
-                  filledBins={footScanCoverageBins}
-                  currentAngleDeg={liveOrbitAngleDeg}
-                  urgent={scanMovementGuidance != null}
-                  className="absolute inset-0 h-full w-full"
-                />
-                {footDetected && scanOverlayEnabled && !footScanCoverageComplete ? (
-                  <div
-                    className="neuma-move-guide-spin pointer-events-none absolute inset-[7px] z-[11]"
-                    role="img"
-                    aria-label="Percorso circolare: muovi il telefono in senso orario intorno al piede"
-                  >
-                    <div className="absolute left-1/2 top-[1px] -translate-x-1/2">
-                      <svg
-                        width="26"
-                        height="16"
-                        viewBox="0 0 26 16"
-                        className="drop-shadow-[0_0_10px_rgba(0,0,0,0.65)]"
-                        aria-hidden
-                      >
-                        <path
-                          d="M2.5 8h12.5M9.5 3.5L17 8l-7.5 4.5"
-                          fill="none"
-                          stroke={moveGuideArrowStroke}
-                          strokeWidth="2.25"
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                        />
-                      </svg>
-                    </div>
-                  </div>
-                ) : null}
-                <style>{`
-                  @keyframes neumaOrbit360 {
-                    from { transform: rotate(0deg); }
-                    to { transform: rotate(360deg); }
-                  }
-                  .neuma-orbit-anim { animation: neumaOrbit360 2.2s linear infinite; }
-                  @keyframes neumaMoveGuideOrbit {
-                    from { transform: rotate(0deg); }
-                    to { transform: rotate(360deg); }
-                  }
-                  .neuma-move-guide-spin {
-                    animation: neumaMoveGuideOrbit 2.65s linear infinite;
-                  }
-                  @media (prefers-reduced-motion: reduce) {
-                    .neuma-orbit-anim { animation: none; }
-                    .neuma-move-guide-spin { animation: none; }
-                  }
-                `}</style>
-
-                {/* foot target */}
-                <div className="absolute left-1/2 top-1/2 h-8 w-10 -translate-x-1/2 -translate-y-1/2 rounded-[999px] border border-white/10 bg-white/[0.05]" />
-
-                {/* orbit ring + phone */}
-                <div className="neuma-orbit-anim absolute inset-[10px] flex items-center justify-center">
-                  <div
-                    className={cn(
-                      "absolute inset-0 rounded-full border border-white/10",
-                      beginnerNudgeActive && "border-[#fbbf24]/65 shadow-[0_0_22px_rgba(251,191,36,0.25)]"
-                    )}
-                  />
-
-                  <div className="absolute left-1/2 top-1/2 h-0 w-0 -translate-x-1/2 -translate-y-1/2">
-                    <div className="absolute left-1/2 top-[-2px] h-10 w-6 -translate-x-1/2 rounded-[10px] border border-white/15 bg-white/[0.06] shadow-[0_10px_30px_rgba(0,0,0,0.35)]">
-                      <div className="absolute inset-x-1 top-2 h-[7px] rounded-[5px] bg-white/10" />
-                      <div className="absolute bottom-1.5 left-1/2 h-2 w-2 -translate-x-1/2 rounded-full bg-white/15" />
-                    </div>
-                  </div>
-                </div>
-              </div>
-              <div
-                className="mt-1 max-w-[min(92vw,18rem)] text-center text-[11px] font-medium tabular-nums leading-snug text-white/80 sm:text-xs"
-                aria-live="polite"
-              >
-                <span className="font-semibold text-emerald-200/95">
-                  {footScanCoverageBins.size}
-                </span>
-                <span className="text-white/45"> / {orbitBinsTarget} settori</span>
-                {footScanCoverageComplete ? (
-                  <span className="text-emerald-200/90"> · Piede completo</span>
-                ) : scanCaptureCoverageProgress < 1 ? (
-                  <span className="text-white/60">
-                    {" "}
-                    · ancora da coprire: {orbitBinsTarget - footScanCoverageBins.size} settori
-                  </span>
-                ) : (
-                  <span className="text-emerald-200/90"> · Giro angolare coperto</span>
-                )}
-              </div>
-            </div>
-
-            <div className="text-center" aria-live="polite">
+        {/* Bottom movement hint — only when actively guiding direction */}
+        {cameraState === "readyPhase" && scanMovementGuidance?.text && !footScanCoverageComplete ? (
+          <div className="pointer-events-none absolute bottom-[4.5rem] left-1/2 z-[58] -translate-x-1/2 px-5 sm:bottom-[5.2rem]">
+            <AnimatePresence mode="wait">
               <motion.div
-                key="scan-big"
+                key={scanMovementGuidance.text}
                 initial={{ opacity: 0, y: 6 }}
                 animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -6 }}
-                transition={{ duration: 0.22, ease: "easeOut" }}
-                className="text-3xl font-semibold tracking-tight text-white drop-shadow-[0_1px_10px_rgba(0,0,0,0.55)] sm:text-4xl"
+                exit={{ opacity: 0, y: 4 }}
+                transition={{ duration: 0.28, ease: "easeOut" }}
               >
-                Gira intorno al piede
-              </motion.div>
-              <p className="mt-2 text-sm font-semibold text-white/75" aria-live="polite">
-                {scanPrimaryPrompt}
-              </p>
-              {selfMode && scanMovementGuidance?.text ? (
-                <p className="mt-2 text-sm font-medium text-white/60" aria-live="polite">
+                <div className="rounded-full border border-amber-300/12 bg-white/[0.03] px-4 py-1.5 text-[12px] font-medium text-amber-100/65 backdrop-blur-2xl">
                   {scanMovementGuidance.text}
-                </p>
-              ) : null}
-            </div>
+                </div>
+              </motion.div>
+            </AnimatePresence>
           </div>
-        )}
+        ) : null}
 
         {/* phase content */}
         <AnimatePresence mode="wait">
           {cameraState === "betweenFeet" && (
             <motion.div
               key="betweenFeet"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              transition={{ duration: 0.24 }}
-              className="pointer-events-auto absolute inset-0 z-[90] flex items-center justify-center px-6"
+              initial={{ opacity: 0, y: 16 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: 8 }}
+              transition={{ duration: 0.28, ease: "easeOut" }}
+              className="pointer-events-auto absolute inset-x-0 bottom-0 z-[90] flex justify-center px-5 pb-[max(2rem,env(safe-area-inset-bottom))]"
             >
-              <div className="w-full max-w-lg rounded-2xl border border-white/15 bg-black/45 p-6 text-center backdrop-blur-[2px]">
-                <div className="text-lg font-semibold tracking-tight text-white sm:text-xl">
-                  Perfetto! Ora passa all&apos;altro piede
-                </div>
-                <div className="mt-4">
-                  <Button
-                    type="button"
-                    variant="secondary"
-                    onClick={() => {
-                      void resumeToSecondFoot();
-                    }}
-                    className="w-full rounded-full border border-white/25 bg-white/15 py-6 text-sm font-semibold text-white hover:bg-white/20"
-                  >
-                    {`Scansiona piede ${secondFootLabel}`}
-                  </Button>
-                  {footSelectionWarning ? (
-                    <div className="mt-3 text-sm font-medium text-amber-200/90">{footSelectionWarning}</div>
-                  ) : null}
-                </div>
+              <div className="w-full max-w-sm rounded-3xl border border-white/12 bg-black/55 px-5 py-6 text-center backdrop-blur-xl">
+                <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-emerald-400/80">
+                  Piede completato
+                </p>
+                <p className="mt-1.5 text-lg font-semibold tracking-tight text-white">
+                  Ora il piede {secondFootLabel.toLowerCase()}
+                </p>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  onClick={() => { void resumeToSecondFoot(); }}
+                  className="mt-5 w-full rounded-full border border-white/22 bg-white/12 py-5 text-sm font-semibold text-white hover:bg-white/18"
+                >
+                  Continua
+                </Button>
+                {footSelectionWarning ? (
+                  <p className="mt-2 text-[12px] font-medium text-amber-200/80">{footSelectionWarning}</p>
+                ) : null}
               </div>
             </motion.div>
           )}
@@ -3617,26 +3833,15 @@ export default function ScannerCattura() {
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
               transition={{ duration: 0.24 }}
-              className="pointer-events-auto absolute inset-0 z-50 flex items-center justify-center px-6"
+              className="pointer-events-none absolute inset-0 z-50 flex items-center justify-center"
             >
-              <div className="w-full max-w-lg text-center">
-                <div className="text-sm font-medium text-white/90">Preparazione scansione continua</div>
-                <motion.div
-                  className="mt-3 text-base text-[#e5e5e5]"
-                  animate={{ opacity: [0.5, 1, 0.5] }}
-                  transition={{ duration: 1.4, repeat: Infinity, ease: "easeInOut" }}
-                >
-                  Fotocamera dal vivo — nessuno scatto manuale
-                </motion.div>
-                <Button
-                  type="button"
-                  variant="secondary"
-                  onClick={retryCameraFromUserTap}
-                  className="mt-8 w-full rounded-full border border-white/25 bg-white/15 py-6 text-sm font-semibold text-white hover:bg-white/20"
-                >
-                  Non vedi l’anteprima? Tocca qui
-                </Button>
-              </div>
+              <motion.div
+                className="rounded-full border border-white/12 bg-black/35 px-5 py-2 text-[13px] font-medium text-white/70 backdrop-blur-md"
+                animate={{ opacity: [0.55, 1, 0.55] }}
+                transition={{ duration: 1.6, repeat: Infinity, ease: "easeInOut" }}
+              >
+                Avvio fotocamera…
+              </motion.div>
             </motion.div>
           )}
 
@@ -3646,112 +3851,132 @@ export default function ScannerCattura() {
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
-              transition={{ duration: 0.24 }}
-              className="pointer-events-auto absolute inset-0 z-50 flex items-center justify-center px-6"
+              transition={{ duration: 0.28 }}
+              className="pointer-events-auto absolute inset-0 z-50 flex items-end justify-center px-5 pb-[max(2.5rem,env(safe-area-inset-bottom))]"
             >
-              <div className="w-full max-w-lg rounded-2xl border border-white/15 bg-black/45 p-6 text-center backdrop-blur-[2px]">
-                <div className="text-xl font-semibold tracking-tight text-white sm:text-2xl">
-                  Quale piede stai scansionando?
-                </div>
-                <p className="mt-3 text-sm leading-snug text-white/65">
-                  Poi muovi solo il telefono: registrazione continua dal video, senza pulsante di scatto.
+              <div className="w-full max-w-sm rounded-3xl border border-white/12 bg-black/50 px-5 py-6 text-center backdrop-blur-xl">
+                <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-white/38">
+                  Scansione piede
                 </p>
-                <div className="mt-5 flex flex-col gap-3">
+                <p className="mt-1.5 text-lg font-semibold tracking-tight text-white">
+                  Inizia con quale piede?
+                </p>
+                <div className="mt-5 flex gap-3">
                   <Button
                     type="button"
                     variant="secondary"
                     onClick={() => chooseFirstFootAndStart("LEFT")}
-                    className="w-full rounded-full border border-white/25 bg-white/15 py-6 text-sm font-semibold text-white hover:bg-white/20"
+                    className="flex-1 rounded-full border border-white/22 bg-white/12 py-5 text-sm font-semibold text-white hover:bg-white/18"
                   >
-                    Avvia fotocamera (piede sinistro)
+                    Sinistro
                   </Button>
                   <Button
                     type="button"
                     variant="secondary"
                     onClick={() => chooseFirstFootAndStart("RIGHT")}
-                    className="w-full rounded-full border border-white/25 bg-white/15 py-6 text-sm font-semibold text-white hover:bg-white/20"
+                    className="flex-1 rounded-full border border-white/22 bg-white/12 py-5 text-sm font-semibold text-white hover:bg-white/18"
                   >
-                    Avvia fotocamera (piede destro)
+                    Destro
                   </Button>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    onClick={retryCameraFromUserTap}
-                    className="w-full rounded-full border-white/15 bg-white/[0.04] py-5 text-sm font-semibold text-white/90 hover:bg-white/[0.07]"
-                  >
-                    Se non si apre, tocca qui
-                  </Button>
-                  {footSelectionWarning ? (
-                    <div className="mt-1 text-sm font-medium text-amber-200/90">{footSelectionWarning}</div>
-                  ) : null}
                 </div>
+                {footSelectionWarning ? (
+                  <p className="mt-3 text-[12px] font-medium text-amber-200/80">{footSelectionWarning}</p>
+                ) : null}
               </div>
             </motion.div>
           )}
 
         </AnimatePresence>
 
-        {/* review */}
+        {/* review — silent, just a pulse */}
         {cameraState === "review" && (
-          <div className="pointer-events-none absolute inset-0 z-55 flex items-center justify-center px-6">
+          <div className="pointer-events-none absolute inset-0 z-55 flex items-center justify-center">
             <motion.div
               initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              transition={{ duration: 0.24 }}
-              className="w-full max-w-xl text-center"
-            >
-              <div className="text-sm font-medium text-white/90">Fatto</div>
-              <div className="mt-1 text-xs text-white/70">Elaborazione</div>
-            </motion.div>
+              animate={{ opacity: [0, 0.6, 0] }}
+              transition={{ duration: 1.8, repeat: Infinity, ease: "easeInOut" }}
+              className="h-2 w-2 rounded-full bg-white/60"
+            />
           </div>
         )}
 
         {/* error overlay */}
         {cameraState === "error" && (
-          <div className="absolute inset-0 z-60 flex items-center justify-center px-6">
-            <div className="w-full max-w-xl rounded-2xl border border-red-400/20 bg-zinc-950/70 p-6 text-center backdrop-blur-md">
-              <div className="font-mono text-xs tracking-[0.18em] text-red-200">ERRORE</div>
-              <div className="mt-3 text-xs text-red-200/90">{error}</div>
-              <div className="mt-5 flex flex-col gap-3">
+          <div className="absolute inset-x-0 bottom-0 z-60 flex justify-center px-5 pb-[max(2rem,env(safe-area-inset-bottom))]">
+            <div className="w-full max-w-sm rounded-3xl border border-white/10 bg-white/[0.03] px-5 py-6 text-center backdrop-blur-2xl">
+              <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-rose-400/80">
+                Fotocamera non disponibile
+              </p>
+              <p className="mt-1.5 text-[12px] text-white/45 break-words">{error}</p>
+              <div className="mt-5 flex flex-col gap-2.5">
                 <Button
                   type="button"
                   variant="secondary"
                   onClick={retryCameraFromUserTap}
-                  className="h-auto w-full rounded-xl border border-white/20 bg-white/10 py-4 text-sm font-semibold text-white hover:bg-white/15"
+                  className="w-full rounded-full border border-white/22 bg-white/12 py-5 text-sm font-semibold text-white hover:bg-white/18"
                 >
-                  Riprova fotocamera
+                  Riprova
                 </Button>
                 <Button
                   type="button"
                   variant="outline"
                   onClick={resetTotal}
-                  className="h-auto w-full rounded-xl border-zinc-800 bg-zinc-900/50 px-6 py-4 font-mono text-lg tracking-[0.14em] text-zinc-100 backdrop-blur-md hover:bg-zinc-800 hover:text-zinc-100"
+                  className="w-full rounded-full border-white/10 bg-white/[0.03] py-4 text-sm font-semibold text-white/55 hover:bg-white/[0.06]"
                 >
-                  RESET TOTALE
+                  Esci
                 </Button>
               </div>
             </div>
           </div>
         )}
 
-        {/* uploading/process */}
+        {/* uploading — Apple-style progress bar + label */}
         {cameraState === "uploading" && (
-          <div className="pointer-events-none absolute inset-0 z-[75] flex items-center justify-center px-6">
+          <div className="pointer-events-none absolute inset-0 z-[75] flex items-end justify-center pb-[max(3.5rem,env(safe-area-inset-bottom))]">
             <motion.div
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              transition={{ duration: 0.24 }}
-              className="text-center"
+              initial={{ opacity: 0, y: 12 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: 8 }}
+              transition={{ duration: 0.35, ease: "easeOut" }}
+              className="w-[min(88vw,22rem)]"
             >
-              <div className="text-sm font-medium text-white/90">Elaborazione</div>
-              <motion.div
-                className="mt-1 text-xs text-white/70"
-                animate={{ opacity: [0.45, 1, 0.45] }}
-                transition={{ duration: 1.4, repeat: Infinity, ease: "easeInOut" }}
-              >
-                Attendi
-              </motion.div>
+              <div className="rounded-3xl border border-white/10 bg-white/[0.03] px-5 py-5 backdrop-blur-2xl">
+                {/* Label row */}
+                <div className="flex items-center justify-between">
+                  <span className="text-[13px] font-medium text-white/75">
+                    {videoUploadProgress > 0 && videoUploadProgress < 100
+                      ? "Invio dati al MacBook Pro…"
+                      : videoUploadProgress >= 100
+                        ? "Elaborazione in corso…"
+                        : "Preparazione…"}
+                  </span>
+                  <span className="font-mono text-[11px] text-white/38">
+                    {videoUploadProgress > 0 ? `${videoUploadProgress}%` : ""}
+                  </span>
+                </div>
+
+                {/* Track */}
+                <div className="mt-3 h-[3px] w-full overflow-hidden rounded-full bg-white/10">
+                  <motion.div
+                    className="h-full rounded-full"
+                    style={{
+                      background: videoUploadProgress >= 100
+                        ? "rgba(52,211,153,0.85)"
+                        : "linear-gradient(90deg,rgba(52,211,153,0.80),rgba(34,211,238,0.80))",
+                    }}
+                    initial={{ width: "0%" }}
+                    animate={{ width: videoUploadProgress > 0 ? `${videoUploadProgress}%` : "4%" }}
+                    transition={{ ease: "easeOut", duration: 0.4 }}
+                  />
+                </div>
+
+                {/* Sublabel */}
+                <p className="mt-2 text-[11px] text-white/32">
+                  {videoUploadProgress >= 100
+                    ? "Video ricevuto"
+                    : "Il video viene caricato nel cloud per l'analisi"}
+                </p>
+              </div>
             </motion.div>
           </div>
         )}

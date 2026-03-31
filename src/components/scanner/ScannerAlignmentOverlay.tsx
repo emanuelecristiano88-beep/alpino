@@ -18,46 +18,30 @@ function CornerBracket({
 }) {
   const ring =
     tone === "red"
-      ? "border-[#fca5a5]/90 shadow-[0_0_12px_rgba(248,113,113,0.35)]"
+      ? "border-[#fca5a5]/65"
       : tone === "yellow"
-        ? "border-[#fcd34d]/88 shadow-[0_0_12px_rgba(251,191,36,0.32)]"
+        ? "border-[#fcd34d]/62"
         : tone === "green"
-          ? "border-[#6ee7b7]/90 shadow-[0_0_14px_rgba(52,211,153,0.38)]"
-          : "border-[#eaf3ff]/80 shadow-[0_0_10px_rgba(142,197,255,0.22)]";
-  const sq =
-    tone === "red"
-      ? "border-[#fecaca]/75 bg-[#fee2e2]/[0.08]"
-      : tone === "yellow"
-        ? "border-[#fde68a]/72 bg-[#fef3c7]/[0.07]"
-        : tone === "green"
-          ? "border-[#a7f3d0]/75 bg-[#d1fae5]/[0.08]"
-          : "border-[#eaf3ff]/65 bg-[#dbeafe]/[0.04]";
+          ? "border-[#22d3ee]/72"
+          : "border-[#22d3ee]/32";
 
   const outer = {
-    tl: "left-2.5 top-2.5",
-    tr: "right-2.5 top-2.5",
-    bl: "bottom-2.5 left-2.5",
-    br: "bottom-2.5 right-2.5",
+    tl: "left-3 top-3",
+    tr: "right-3 top-3",
+    bl: "bottom-3 left-3",
+    br: "bottom-3 right-3",
   }[position];
 
   const bracket = {
-    tl: "rounded-tl-2xl border-l-[2.5px] border-t-[2.5px]",
-    tr: "rounded-tr-2xl border-r-[2.5px] border-t-[2.5px]",
-    bl: "rounded-bl-2xl border-b-[2.5px] border-l-[2.5px]",
-    br: "rounded-br-2xl border-b-[2.5px] border-r-[2.5px]",
-  }[position];
-
-  const squarePos = {
-    tl: "left-1 top-1",
-    tr: "right-1 top-1",
-    bl: "bottom-1 left-1",
-    br: "bottom-1 right-1",
+    tl: "rounded-tl-xl border-l-[1.5px] border-t-[1.5px]",
+    tr: "rounded-tr-xl border-r-[1.5px] border-t-[1.5px]",
+    bl: "rounded-bl-xl border-b-[1.5px] border-l-[1.5px]",
+    br: "rounded-br-xl border-b-[1.5px] border-r-[1.5px]",
   }[position];
 
   return (
-    <div className={cn("pointer-events-none absolute z-[5] h-[2.1rem] w-[2.1rem]", outer)}>
-      <div className={cn("relative h-[2.1rem] w-[2.1rem] border-transparent", bracket, ring)} />
-      <div className={cn("absolute h-2.5 w-2.5 rounded-sm border", sq, squarePos)} />
+    <div className={cn("pointer-events-none absolute z-[5] h-[1.6rem] w-[1.6rem]", outer)}>
+      <div className={cn("relative h-[1.6rem] w-[1.6rem] border-transparent", bracket, ring)} />
     </div>
   );
 }
@@ -107,21 +91,19 @@ export default function ScannerAlignmentOverlay({
 
   const frameStrokeClass = useMemo(() => {
     if (readinessTone === "red")
-      return "border-[#f87171]/85 shadow-[0_0_26px_rgba(248,113,113,0.32)]";
+      return "border-[#f87171]/55 shadow-[0_0_14px_rgba(248,113,113,0.16)]";
     if (readinessTone === "yellow")
-      return "border-[#fbbf24]/82 shadow-[0_0_24px_rgba(251,191,36,0.28)]";
+      return "border-[#fbbf24]/52 shadow-[0_0_12px_rgba(251,191,36,0.14)]";
     if (readinessTone === "green")
-      return "border-[#34d399]/88 shadow-[0_0_28px_rgba(52,211,153,0.34)]";
+      return "border-[#22d3ee]/68 shadow-[0_0_18px_rgba(34,211,238,0.18)]";
     return tooClose
-      ? "border-[#ff8a8a]/82 shadow-[0_0_22px_rgba(255,138,138,0.28)]"
-      : "border-[#d8ebff]/78 shadow-[0_0_24px_rgba(142,197,255,0.26)]";
+      ? "border-[#ff8a8a]/50 shadow-[0_0_12px_rgba(255,138,138,0.14)]"
+      : "border-[#22d3ee]/[0.22] shadow-[0_0_14px_rgba(34,211,238,0.08)]";
   }, [readinessTone, tooClose]);
 
   const frameBgClass = useMemo(() => {
-    if (readinessTone === "red") return "bg-[#fecaca]/[0.09]";
-    if (readinessTone === "yellow") return "bg-[#fef3c7]/[0.07]";
-    if (readinessTone === "green") return "bg-[#d1fae5]/[0.08]";
-    return tooClose ? "bg-[#ff8a8a]/[0.075]" : "bg-[#cfe7ff]/[0.045]";
+    if (readinessTone === "green") return "bg-[#d1fae5]/[0.03]";
+    return "bg-transparent";
   }, [readinessTone, tooClose]);
 
   const bracketTone: CaptureReadinessTone | "blue" = readinessTone ?? "blue";

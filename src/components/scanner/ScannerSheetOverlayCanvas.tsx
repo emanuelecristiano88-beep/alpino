@@ -131,23 +131,17 @@ export default function ScannerSheetOverlayCanvas({
 
       const t = performance.now() / 1000;
       const premium = premiumReady && tone === "green";
-      const pulse = premium ? 1 + 0.082 * Math.sin(t * 2.2) : locked ? 1 + 0.05 * Math.sin(t * 3.2) : 1;
-      const lineW = (premium ? 2.85 : locked ? 2.4 : 1.8) * pulse;
+      const pulse = premium ? 1 + 0.055 * Math.sin(t * 2.2) : locked ? 1 + 0.03 * Math.sin(t * 3.2) : 1;
+      const lineW = (premium ? 1.8 : locked ? 1.5 : 1.2) * pulse;
 
-      ctx.save();
-      ctx.globalAlpha = (premium ? 0.26 : 0.18) * alphaRef.current;
-      drawRoundedPath(ctx, pts, 10);
-      ctx.fillStyle = toneColor.glow;
-      ctx.fill();
-      ctx.restore();
-
+      // Outline only — no fill (keeps video fully visible).
       if (premium) {
         ctx.save();
-        ctx.globalAlpha = 0.45 * alphaRef.current * (0.85 + 0.15 * Math.sin(t * 2.2));
-        ctx.shadowBlur = 32 * pulse;
+        ctx.globalAlpha = 0.28 * alphaRef.current * (0.85 + 0.15 * Math.sin(t * 2.2));
+        ctx.shadowBlur = 18 * pulse;
         ctx.shadowColor = toneColor.glowOuter ?? "rgba(16,185,129,0.4)";
-        ctx.lineWidth = lineW * 1.65;
-        ctx.strokeStyle = "rgba(167,243,208,0.45)";
+        ctx.lineWidth = lineW * 1.4;
+        ctx.strokeStyle = "rgba(167,243,208,0.35)";
         ctx.lineJoin = "round";
         drawRoundedPath(ctx, pts, 12);
         ctx.stroke();
@@ -155,8 +149,8 @@ export default function ScannerSheetOverlayCanvas({
       }
 
       ctx.save();
-      ctx.globalAlpha = 0.94 * alphaRef.current;
-      ctx.shadowBlur = premium ? 26 + 6 * Math.sin(t * 2.2) : locked ? 18 : 10;
+      ctx.globalAlpha = 0.88 * alphaRef.current;
+      ctx.shadowBlur = premium ? 14 + 4 * Math.sin(t * 2.2) : locked ? 10 : 6;
       ctx.shadowColor = toneColor.glow;
       ctx.lineWidth = lineW;
       ctx.strokeStyle = toneColor.stroke;
@@ -165,13 +159,14 @@ export default function ScannerSheetOverlayCanvas({
       ctx.stroke();
       ctx.restore();
 
+      // Tiny corner accent dots only.
       for (const p of pts) {
         ctx.save();
-        ctx.globalAlpha = 0.96 * alphaRef.current;
+        ctx.globalAlpha = 0.82 * alphaRef.current;
         ctx.beginPath();
-        ctx.arc(p.x, p.y, premium ? 5.2 : locked ? 4.5 : 3.8, 0, Math.PI * 2);
+        ctx.arc(p.x, p.y, premium ? 2.8 : locked ? 2.4 : 2.0, 0, Math.PI * 2);
         ctx.fillStyle = toneColor.stroke;
-        ctx.shadowBlur = premium ? 18 + 4 * Math.sin(t * 2.2) : locked ? 14 : 8;
+        ctx.shadowBlur = premium ? 10 + 3 * Math.sin(t * 2.2) : locked ? 7 : 4;
         ctx.shadowColor = toneColor.glow;
         ctx.fill();
         ctx.restore();
