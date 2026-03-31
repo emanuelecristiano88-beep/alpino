@@ -1,0 +1,64 @@
+/**
+ * Vercel Serverless (Edge) — POST /api/orders
+ * Stesso contratto della vecchia route Next in docs/backend-reference-next-app-router/
+ */
+export const config = { runtime: "edge" };
+
+type OrderBody = {
+  scanId?: string;
+  /** JSON string da `serializeBiometryForMac` (NEUMA biometria) */
+  biometryJson?: string;
+  /** Stesso payload come oggetto (opzionale) */
+  biometryPayload?: Record<string, unknown>;
+  source?: string;
+  tagliaScelta?: string;
+  coloreSelezionato?: string;
+  millimetri?: {
+    lunghezzaMm?: number;
+    larghezzaMm?: number;
+    altezzaArcoMm?: number;
+    circonferenzaColloMm?: number;
+    volumeCm3?: number;
+    filamentoTpuG?: number;
+  };
+};
+
+export default async function handler(request: Request): Promise<Response> {
+  if (request.method !== "POST") {
+    return Response.json({ ok: false, error: "Method not allowed" }, { status: 405 });
+  }
+
+  try {
+    const body = (await request.json()) as OrderBody;
+    const orderId = crypto.randomUUID();
+
+    console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    console.log("[NEUMA] Nuovo ordine in produzione (Vercel Edge)");
+    console.log("  orderId:", orderId);
+    console.log("  scanId:", body.scanId ?? "(mancante)");
+    console.log("  source:", body.source ?? "(mancante)");
+    if (body.biometryJson) {
+      console.log("  biometryJson length:", body.biometryJson.length, "chars");
+    }
+    if (body.biometryPayload && typeof body.biometryPayload === "object") {
+      const p = body.biometryPayload as { schema?: string; user_profile_v2?: { version?: number } };
+      console.log("  biometryPayload.schema:", p.schema ?? "?");
+      if (p.user_profile_v2) {
+        console.log("  biometryPayload.user_profile_v2.version:", p.user_profile_v2.version ?? "?");
+      }
+    }
+    console.log("  tagliaScelta:", body.tagliaScelta ?? "(mancante)");
+    console.log("  coloreSelezionato:", body.coloreSelezionato ?? "(mancante)");
+    console.log("  millimetri:", JSON.stringify(body.millimetri ?? {}, null, 2));
+    console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+
+    return Response.json({
+      ok: true,
+      orderId,
+      message: "Ordine registrato. NEUMA notificata (simulazione log).",
+    });
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return Response.json({ ok: false, error: msg }, { status: 500 });
+  }
+}

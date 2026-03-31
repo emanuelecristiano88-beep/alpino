@@ -1,0 +1,50 @@
+/**
+ * Stampa A4 1:1 — nessun ridimensionamento automatico del browser.
+ * L’utente deve confermare "Scala 100%" / "Dimensioni effettive" nella finestra di stampa.
+ */
+@media print {
+  @page {
+    size: A4 portrait;
+    margin: 0;
+  }
+
+  html.print-scanner-target,
+  body.print-scanner-target {
+    width: 210mm !important;
+    height: 297mm !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    background: #fff !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+
+  body.print-scanner-target * {
+    visibility: hidden;
+  }
+
+  body.print-scanner-target .scanner-target-printable,
+  body.print-scanner-target .scanner-target-printable * {
+    visibility: visible;
+  }
+
+  body.print-scanner-target .scanner-target-printable {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 210mm !important;
+    height: 297mm !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    box-shadow: none !important;
+    border: none !important;
+  }
+
+  body.print-scanner-target .scanner-target-printable svg {
+    width: 210mm !important;
+    height: 297mm !important;
+    max-width: none !important;
+    max-height: none !important;
+    display: block !important;
+  }
+}

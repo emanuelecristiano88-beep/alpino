@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="it" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="color-scheme" content="dark light" />
+    <!-- Fallback se il CSS non carica: testo sempre leggibile su sfondo scuro -->
+    <style>
+      /* Prima di React: primary blu (evita flash lime da cache / vecchio tema) */
+      html {
+        --primary: 221 83% 53% !important;
+        --primary-foreground: 0 0% 98% !important;
+        --ring: 217 91% 60% !important;
+      }
+      html.dark,
+      html.dark body {
+        background-color: #000000;
+        color: #fafafa;
+      }
+      #root {
+        min-height: 100dvh;
+        min-height: 100vh;
+      }
+    </style>
+    <link rel="icon" type="image/png" href="/images/neuma-logo.png" />
+    <link rel="apple-touch-icon" href="/images/neuma-logo.png" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <!-- Non blocca il primo paint se fonts.googleapis.com è lento -->
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap"
+      rel="stylesheet"
+      media="print"
+      onload="this.media='all'"
+    />
+    <noscript>
+      <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap"
+        rel="stylesheet"
+      />
+    </noscript>
+    <title>NEUMA</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>
