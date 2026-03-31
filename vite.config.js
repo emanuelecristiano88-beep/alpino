@@ -161,16 +161,9 @@ export default defineConfig({
     reportCompressedSize: false,
     chunkSizeWarningLimit: 1600,
     rollupOptions: {
-      output: {
-        /**
-         * Solo vendor pesanti separati. Evitare di spezzare React/React-DOM in chunk
-         * incoerenti (può dare schermata vuota in produzione).
-         */
-        manualChunks(id) {
-          if (id.includes('node_modules/three')) return 'three'
-          if (id.includes('@react-three')) return 'r3f'
-        },
-      },
+      // NO manualChunks: custom chunks cause circular chunk dependencies with lazy()
+      // which produce "Cannot access '...' before initialization" (TDZ) on Android Chrome.
+      // Vite's automatic splitting handles lazy() boundaries correctly without cycles.
     },
   },
 })

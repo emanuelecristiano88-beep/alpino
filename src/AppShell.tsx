@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { Suspense, lazy, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import {
   Book,
@@ -14,16 +14,19 @@ import {
   Sparkles,
   X,
 } from "lucide-react";
-import ScannerCattura from "./ScannerCattura";
+
+const ScannerCattura = lazy(() => import("./ScannerCattura"));
 import LibraryScreen from "./screens/LibraryScreen";
 import NeumaOnboarding from "./components/NeumaOnboarding";
-import ScanTutorialModal from "./components/ScanTutorialModal";
 import { Button } from "./components/ui/button";
-import { Dialog, DialogContent, DialogTitle } from "./components/ui/dialog";
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from "./components/ui/dialog";
 import { cn } from "./lib/utils";
-import { discardCameraStreamHandoff } from "./lib/cameraStreamHandoff";
+import { discardCameraStreamHandoff, setCameraStreamHandoff } from "./lib/cameraStreamHandoff";
 import NeumaLogo from "./components/NeumaLogo";
 import LandingPage from "./pages/LandingPage";
+import ScanModeSelectScreen, { type ScanMode } from "./components/ScanModeSelectScreen";
+import ScanOnboardingSlides from "./components/ScanOnboardingSlides";
+import { setScanMode as persistScanMode } from "./lib/scanMode";
 
 type TabId = "library" | "albums" | "explore" | "menu";
 
@@ -38,8 +41,8 @@ function BottomNav({ tab, setTab }: { tab: TabId; setTab: (t: TabId) => void }) 
   const items = useMemo(() => NAV_ITEMS, []);
 
   return (
-    <nav className="fixed bottom-0 left-0 right-0 z-50 border-t border-white/10 bg-black/90 backdrop-blur-md">
-      <div className="mx-auto grid w-full max-w-lg grid-cols-4 px-1 pb-[env(safe-area-inset-bottom,0px)]">
+    <nav className="fixed bottom-0 left-0 right-0 z-50 border-t border-white/10 bg-black/75 backdrop-blur-xl">
+      <div className="mx-auto grid w-full max-w-lg grid-cols-4 px-2 pb-[env(safe-area-inset-bottom,0px)] pt-1">
         {items.map(({ id, label, Icon }) => {
           const active = tab === id;
           return (
@@ -48,7 +51,7 @@ function BottomNav({ tab, setTab }: { tab: TabId; setTab: (t: TabId) => void }) 
               type="button"
               variant="ghost"
               className={cn(
-                "flex h-auto flex-col gap-1 rounded-none py-3 text-[#e5e5e5]/65 hover:bg-transparent hover:text-white",
+                "neuma-touch flex h-auto flex-col gap-1 rounded-2xl py-3 text-[#e5e5e5]/65 hover:bg-white/[0.05] hover:text-white",
                 active && "text-white"
               )}
               onClick={() => setTab(id)}
@@ -56,8 +59,8 @@ function BottomNav({ tab, setTab }: { tab: TabId; setTab: (t: TabId) => void }) 
             >
               <span
                 className={cn(
-                  "flex h-11 w-11 items-center justify-center rounded-md transition-colors",
-                  active && "bg-white/14 text-white shadow-[0_8px_24px_rgba(255,255,255,0.08)]"
+                  "neuma-anim flex h-11 w-11 items-center justify-center rounded-2xl",
+                  active && "bg-white/12 text-white shadow-[0_18px_60px_rgba(0,0,0,0.55)]"
                 )}
               >
                 <Icon className={cn("h-6 w-6", active ? "text-white" : "text-current")} strokeWidth={active ? 2 : 1.75} />
@@ -175,15 +178,14 @@ export default function AppShell() {
   const navigate = useNavigate();
   const [tab, setTab] = useState<TabId>("library");
   const [onboardingOpen, setOnboardingOpen] = useState(false);
-  const [tutorialOpen, setTutorialOpen] = useState(false);
   const [scannerOpen, setScannerOpen] = useState(false);
+  const [scanModeOpen, setScanModeOpen] = useState(false);
+  const [scanMode, setScanMode] = useState<ScanMode | null>(null);
+  const [scanSlidesOpen, setScanSlidesOpen] = useState(false);
   const orientationLockAttemptedRef = useRef(false);
-  /** Solo su dispositivi touch: in landscape blocchiamo lo scanner; su desktop no (width > height è normale). */
   const [blockScannerLandscape, setBlockScannerLandscape] = useState(false);
 
   useEffect(() => {
-    // Screen Orientation API: alcuni browser richiedono una gesture utente per la lock.
-    // Proviamo subito e facciamo un retry al primo touch/click.
     const tryLockPortrait = () => {
       if (orientationLockAttemptedRef.current) return;
       orientationLockAttemptedRef.current = true;
@@ -196,20 +198,14 @@ export default function AppShell() {
         if (typeof lockFn === "function") {
           const p = lockFn.call(orient, "portrait");
           if (p && typeof (p as Promise<void>).catch === "function") {
-            (p as Promise<void>).catch(() => {
-              /* NotSupportedError su molti device: ignorato */
-            });
+            (p as Promise<void>).catch(() => {});
           }
         }
-      } catch {
-        /* lock non disponibile o errore sincrono */
-      }
+      } catch {}
     };
 
-    // Attempt on app start.
     tryLockPortrait();
 
-    // Retry on first user gesture (best effort).
     const onFirstGesture = () => tryLockPortrait();
     window.addEventListener("pointerdown", onFirstGesture, { once: true });
     window.addEventListener("touchstart", onFirstGesture, { once: true });
@@ -221,42 +217,37 @@ export default function AppShell() {
   }, []);
 
   useEffect(() => {
-    const update = () => {
-      const landscape = window.innerWidth > window.innerHeight;
-      const coarsePointer =
-        typeof window.matchMedia === "function" && window.matchMedia("(pointer: coarse)").matches;
-      // Alcuni iPhone riportano (pointer: fine): usiamo il lato corto come proxy “phone-like”.
-      const shortest = Math.min(window.innerWidth, window.innerHeight);
-      const phoneLike = coarsePointer || shortest < 600;
-      setBlockScannerLandscape(landscape && phoneLike);
-    };
-    update();
-    window.addEventListener("resize", update);
-    window.addEventListener("orientationchange", update);
-    const mq = typeof window.matchMedia === "function" ? window.matchMedia("(pointer: coarse)") : null;
-    const onMq = () => update();
-    if (mq) {
-      if (typeof mq.addEventListener === "function") mq.addEventListener("change", onMq);
-      else if (typeof (mq as MediaQueryList & { addListener?: (cb: () => void) => void }).addListener === "function") {
-        (mq as MediaQueryList & { addListener: (cb: () => void) => void }).addListener(onMq);
-      }
+    if (!scannerOpen) {
+      setBlockScannerLandscape(false);
+      return;
     }
-    return () => {
-      window.removeEventListener("resize", update);
-      window.removeEventListener("orientationchange", update);
-      if (mq) {
-        if (typeof mq.removeEventListener === "function") mq.removeEventListener("change", onMq);
-        else if (typeof (mq as MediaQueryList & { removeListener?: (cb: () => void) => void }).removeListener === "function") {
-          (mq as MediaQueryList & { removeListener: (cb: () => void) => void }).removeListener(onMq);
-        }
+    const isTouchDevice = "ontouchstart" in window || navigator.maxTouchPoints > 0;
+    if (!isTouchDevice) return;
+
+    const check = () => {
+      const isLandscape = window.innerWidth > window.innerHeight;
+      setBlockScannerLandscape(isLandscape);
+    };
+    check();
+    window.addEventListener("resize", check);
+    return () => window.removeEventListener("resize", check);
+  }, [scannerOpen]);
+
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<{ scanId?: string }>).detail;
+      setScannerOpen(false);
+      discardCameraStreamHandoff();
+      if (detail?.scanId) {
+        navigate("/su-misura", { state: { scanId: detail.scanId } });
+      } else {
+        navigate("/su-misura");
       }
     };
-  }, []);
+    window.addEventListener("neuma:scan-proceed", handler);
+    return () => window.removeEventListener("neuma:scan-proceed", handler);
+  }, [navigate]);
 
-  /**
-   * Da /prepara-scansione (dopo accordi/privacy): sempre onboarding NEUMA completo
-   * (requisiti stampante/foglio/telefono → profilo biometrico → consenso biometria) → tutorial → scanner.
-   */
   useEffect(() => {
     const st = location.state as { autoStartScan?: boolean } | null | undefined;
     if (st?.autoStartScan) {
@@ -266,32 +257,32 @@ export default function AppShell() {
   }, [location.state, location.pathname, navigate]);
 
   const openScannerFlow = () => {
-    setOnboardingOpen(true);
+    setScanMode(null);
+    setScanModeOpen(true);
   };
 
   const finishOnboardingAndOpenTutorial = () => {
     setOnboardingOpen(false);
-    setTutorialOpen(true);
+    setScanSlidesOpen(true);
   };
 
-  const finishTutorialAndStartScan = () => {
-    const hasPrintedA4 =
-      typeof window !== "undefined" ? window.confirm("Hai stampato il foglio A4?") : true;
-    if (!hasPrintedA4) {
-      return;
-    }
-    setTutorialOpen(false);
-    // Doppio rAF: lascia smontare il portal del tutorial prima del dialog fullscreen scanner
-    // (evita overlay/blocco focus su alcuni browser). Il permesso camera è già “warm” dal tap sul tutorial.
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => setScannerOpen(true));
-    });
+  const finishSlidesAndStartScan = () => {
+    setScanSlidesOpen(false);
+    discardCameraStreamHandoff();
+    setScannerOpen(true);
   };
 
   const isLandingRoute = location.pathname === "/";
 
   return (
     <div className="min-h-[100dvh] bg-black">
+      <div
+        className="pointer-events-none fixed inset-0 -z-10"
+        style={{
+          background:
+            "radial-gradient(1200px 700px at 50% -10%, rgba(59,130,246,0.16) 0%, rgba(0,0,0,0) 55%), radial-gradient(1000px 700px at 10% 30%, rgba(255,255,255,0.06) 0%, rgba(0,0,0,0) 55%), radial-gradient(900px 600px at 90% 40%, rgba(16,185,129,0.06) 0%, rgba(0,0,0,0) 55%)",
+        }}
+      />
       {tab === "library" ? (isLandingRoute ? <LandingPage /> : <LibraryScreen onOpenScanner={openScannerFlow} />) : null}
       {tab === "albums" ? <PlaceholderScreen title="Albums" /> : null}
       {tab === "explore" ? <PlaceholderScreen title="Explore" /> : null}
@@ -305,35 +296,72 @@ export default function AppShell() {
         onComplete={finishOnboardingAndOpenTutorial}
       />
 
-      <ScanTutorialModal open={tutorialOpen} onDismiss={finishTutorialAndStartScan} />
+      <Dialog open={scanSlidesOpen} onOpenChange={setScanSlidesOpen}>
+        <DialogContent
+          showClose={false}
+          className="fixed inset-0 left-0 top-0 z-[95] flex h-[100dvh] max-h-[100dvh] w-full max-w-none translate-x-0 translate-y-0 flex-col gap-0 overflow-hidden rounded-none border-0 bg-black p-0 shadow-none data-[state=open]:slide-in-from-bottom-0 data-[state=open]:slide-in-from-left-0 data-[state=open]:zoom-in-100"
+        >
+          <DialogTitle className="sr-only">Onboarding scansione</DialogTitle>
+          <DialogDescription className="sr-only">Guida introduttiva alla scansione del piede</DialogDescription>
+          <ScanOnboardingSlides onComplete={finishSlidesAndStartScan} />
+        </DialogContent>
+      </Dialog>
 
       <Dialog
-        open={scannerOpen}
+        open={scanModeOpen}
         onOpenChange={(open) => {
-          setScannerOpen(open);
-          if (!open) discardCameraStreamHandoff();
+          setScanModeOpen(open);
+          if (!open) setScanMode(null);
         }}
       >
         <DialogContent
           showClose={false}
-          className="fixed inset-0 left-0 top-0 z-[100] flex h-[100dvh] max-h-[100dvh] w-full max-w-none translate-x-0 translate-y-0 flex-col gap-0 overflow-hidden rounded-none border-0 bg-zinc-950 p-0 shadow-none data-[state=open]:slide-in-from-bottom-0 data-[state=open]:slide-in-from-left-0 data-[state=open]:zoom-in-100"
+          className="fixed inset-0 left-0 top-0 z-[95] flex h-[100dvh] max-h-[100dvh] w-full max-w-none translate-x-0 translate-y-0 flex-col gap-0 overflow-hidden rounded-none border-0 bg-black p-0 shadow-none data-[state=open]:slide-in-from-bottom-0 data-[state=open]:slide-in-from-left-0 data-[state=open]:zoom-in-100"
         >
-          <DialogTitle className="sr-only">Scanner NEUMA — scansione continua dal video</DialogTitle>
+          <DialogTitle className="sr-only">Scegli modalità scansione</DialogTitle>
+          <DialogDescription className="sr-only">Seleziona la modalità di scansione</DialogDescription>
+          <ScanModeSelectScreen
+            selected={scanMode}
+            onSelect={setScanMode}
+            onClose={() => setScanModeOpen(false)}
+            onContinue={() => {
+              const mode = scanMode;
+              setScanModeOpen(false);
+              if (!mode) return;
+              persistScanMode(mode);
+              if (mode === "assistant") {
+                navigate("/scanner-operatore");
+                return;
+              }
+              setOnboardingOpen(true);
+            }}
+          />
+        </DialogContent>
+      </Dialog>
+
+      {/* Scanner: NO Radix Dialog — plain fullscreen div to avoid portal/animation/compositor issues on Android.
+          IMPORTANT: NO overflow-hidden on this wrapper — it clips fixed-positioned video on Android Chrome. */}
+      {scannerOpen ? (
+        <div className="fixed inset-0 z-[100] h-[100dvh] w-[100vw] bg-black">
           <div className="pointer-events-none absolute left-0 right-0 top-0 z-[110] flex justify-end p-3">
             <Button
               type="button"
               variant="secondary"
               size="icon"
-              className="pointer-events-auto h-11 w-11 rounded-full border border-white/10 bg-zinc-900/80 text-white shadow-lg backdrop-blur-sm hover:bg-zinc-800"
-              onClick={() => setScannerOpen(false)}
+              className="pointer-events-auto h-11 w-11 rounded-full border border-white/10 bg-zinc-900/80 text-white shadow-lg hover:bg-zinc-800"
+              onClick={() => {
+                setScannerOpen(false);
+                discardCameraStreamHandoff();
+              }}
               aria-label="Chiudi scanner"
             >
               <X className="h-6 w-6" strokeWidth={2} />
             </Button>
           </div>
-          <div className="min-h-0 relative flex-1 overflow-hidden">
-            {/* Montiamo sempre lo scanner: su Android in landscape prima non si montava e la camera/handoff non partivano. */}
-            <ScannerCattura />
+          <div className="relative h-full w-full">
+            <Suspense fallback={<div className="flex h-full w-full items-center justify-center bg-black"><div className="h-8 w-8 animate-spin rounded-full border-2 border-white/20 border-t-white/70" /></div>}>
+              <ScannerCattura />
+            </Suspense>
             {blockScannerLandscape ? (
               <div className="pointer-events-none absolute inset-0 z-[120] flex items-center justify-center bg-black/25 px-6">
                 <div className="text-center">
@@ -341,14 +369,14 @@ export default function AppShell() {
                     Ruota il telefono in verticale
                   </div>
                   <div className="mt-2 text-sm text-white/70">
-                    La fotocamera si avvia comunque: in verticale vedrai l’inquadratura completa.
+                    La fotocamera si avvia comunque: in verticale vedrai l'inquadratura completa.
                   </div>
                 </div>
               </div>
             ) : null}
           </div>
-        </DialogContent>
-      </Dialog>
+        </div>
+      ) : null}
     </div>
   );
 }

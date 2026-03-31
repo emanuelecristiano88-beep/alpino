@@ -6,6 +6,12 @@
  * - scanId (stesso UUID per tutta la sessione)
  * - batchIndex (0..batchTotal-1), batchTotal
  * - driveFolderId (dalla risposta del batch 0, batch successivi)
+ *
+ * Upload video a chunk: inviare più POST con:
+ * - scanId (stesso UUID per tutta la sessione)
+ * - videoChunk (File, tipicamente webm)
+ * - videoChunkIndex (0..N), videoStreamId (uuid), foot (LEFT|RIGHT opzionale)
+ * - driveFolderId (opzionale; altrimenti creato al primo chunk se Drive configurato)
  */
 import {
   createDriveSubfolder,
@@ -41,6 +47,17 @@ function extFromMimeOrMagic(mime: string, bytes: Uint8Array) {
   if (mime === "image/jpeg" || isJpegMagic(bytes)) return ".jpg";
   if (mime === "image/png" || isPngMagic(bytes)) return ".png";
   if (mime === "image/webp" || isWebpMagic(bytes)) return ".webp";
+  return null;
+}
+
+function isWebmMagic(bytes: Uint8Array) {
+  // EBML header (webm/mkv): 1A 45 DF A3
+  return bytes.length >= 4 && bytes[0] === 0x1a && bytes[1] === 0x45 && bytes[2] === 0xdf && bytes[3] === 0xa3;
+}
+
+function extFromVideoMimeOrMagic(mime: string, bytes: Uint8Array) {
+  if (mime === "video/webm" || isWebmMagic(bytes)) return ".webm";
+  // MediaRecorder su Safari può produrre mp4 solo in contesti specifici; per ora limitiamo a webm.
   return null;
 }
 
@@ -88,6 +105,38 @@ async function validatePhotoFiles(entries: FormDataEntryValue[]): Promise<
   }
 
   return { ok: true, validated };
+}
+
+async function validateVideoChunk(entry: FormDataEntryValue | null): Promise<
+  | { ok: true; validated: { buffer: Buffer; mime: string; ext: string; originalName: string } }
+  | { ok: false; status: number; body: Record<string, unknown> }
+> {
+  if (!entry) {
+    return { ok: false, status: 400, body: { status: "error", message: "Nessun chunk video ricevuto (campo: videoChunk)." } };
+  }
+  if (!(entry instanceof File)) {
+    return { ok: false, status: 400, body: { status: "error", message: "Il payload non contiene un file video valido (videoChunk)." } };
+  }
+  const mime = entry.type || "";
+  const arrayBuffer = await entry.arrayBuffer();
+  const bytes = new Uint8Array(arrayBuffer);
+  const ext = extFromVideoMimeOrMagic(mime, bytes.subarray(0, 12));
+  if (!ext) {
+    return {
+      ok: false,
+      status: 400,
+      body: { status: "error", message: "Chunk video non supportato (accettato: video/webm)." },
+    };
+  }
+  return {
+    ok: true,
+    validated: {
+      buffer: Buffer.from(arrayBuffer),
+      mime: mime || "video/webm",
+      ext,
+      originalName: entry.name || `chunk${ext}`,
+    },
+  };
 }
 
 function metricsPayload() {
@@ -172,18 +221,102 @@ export default async function handler(request: Request): Promise<Response> {
         { status: 413 }
       );
     }
-    const entries = formData.getAll("photos");
-    if (!entries.length) {
-      return Response.json(
-        { status: "error", message: "Nessuna foto ricevuta (campo: photos)." },
-        { status: 400 }
-      );
-    }
 
     const batchIndex = Math.max(0, parseInt(String(formData.get("batchIndex") ?? "0"), 10) || 0);
     const batchTotal = Math.max(1, parseInt(String(formData.get("batchTotal") ?? "1"), 10) || 1);
     const clientScanId = String(formData.get("scanId") ?? "").trim();
     const existingDriveFolderId = String(formData.get("driveFolderId") ?? "").trim();
+    const videoChunk = formData.get("videoChunk");
+    const videoChunkIndex = Math.max(
+      0,
+      parseInt(String(formData.get("videoChunkIndex") ?? "0"), 10) || 0
+    );
+    const videoStreamId = String(formData.get("videoStreamId") ?? "").trim();
+    const foot = String(formData.get("foot") ?? "").trim();
+
+    const isVideoUpload = !!videoChunk;
+
+    if (!clientScanId) {
+      return Response.json(
+        { status: "error", message: "Invia il campo scanId (UUID) per associare i file alla sessione." },
+        { status: 400 }
+      );
+    }
+
+    if (isVideoUpload) {
+      const v = await validateVideoChunk(videoChunk);
+      // Narrowing guard that never fails TS (even under different TS configs)
+      if ("status" in v) {
+        return Response.json(v.body, { status: v.status });
+      }
+
+      const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+      const scanId = clientScanId;
+      const folderPath = `/scans/${timestamp}`;
+
+      let driveUploaded = false;
+      let driveFolderId: string | undefined = existingDriveFolderId || undefined;
+      let driveFolderLink: string | undefined;
+      let driveFileId: string | null = null;
+
+      if (isDriveConfigured()) {
+        try {
+          if (!driveFolderId) {
+            const rootId = getRootFolderId();
+            const safeFoot = foot ? `_${foot.replace(/[^\w.\-]+/g, "_")}` : "";
+            const safeStream = videoStreamId ? `_${videoStreamId.slice(0, 8)}` : "";
+            const sub = await createDriveSubfolder(rootId, `video_${timestamp}_${scanId.slice(0, 8)}${safeStream}${safeFoot}`);
+            driveFolderId = sub.id;
+            driveFolderLink = `https://drive.google.com/drive/folders/${sub.id}`;
+          } else {
+            driveFolderLink = `https://drive.google.com/drive/folders/${driveFolderId}`;
+          }
+
+          const chunkName = `chunk_${String(videoChunkIndex).padStart(5, "0")}${v.validated.ext}`;
+          const up = await uploadBufferToDrive({
+            fileName: chunkName,
+            buffer: v.validated.buffer,
+            mimeType: v.validated.mime,
+            parentFolderId: driveFolderId!,
+          });
+          driveFileId = up.id;
+          driveUploaded = true;
+        } catch (e) {
+          console.error("[process-scan] Google Drive (video):", e);
+          return Response.json(
+            {
+              status: "error",
+              scanId,
+              message:
+                e instanceof Error ? `Upload Drive video fallito: ${e.message}` : "Upload Drive video fallito.",
+            },
+            { status: 502 }
+          );
+        }
+      }
+
+      return Response.json({
+        status: "partial",
+        mode: "video",
+        scanId,
+        path: folderPath,
+        videoStreamId: videoStreamId || null,
+        videoChunkIndex,
+        driveUploaded,
+        driveFolderId: driveFolderId ?? null,
+        driveFolderLink: driveFolderLink ?? null,
+        driveFileId,
+        message: `Chunk video ${videoChunkIndex} ricevuto.`,
+      });
+    }
+
+    const entries = formData.getAll("photos");
+    if (!entries.length) {
+      return Response.json(
+        { status: "error", message: "Nessun file ricevuto (campo: photos o videoChunk)." },
+        { status: 400 }
+      );
+    }
 
     const result = await validatePhotoFiles(entries);
     if (!result.ok) {
@@ -195,15 +328,8 @@ export default async function handler(request: Request): Promise<Response> {
 
     const isBatched = batchTotal > 1;
 
-    if (isBatched && !clientScanId) {
-      return Response.json(
-        {
-          status: "error",
-          message: "Upload in più parti: invia il campo scanId (UUID) uguale per ogni batch.",
-        },
-        { status: 400 }
-      );
-    }
+    // scanId è sempre richiesto (anche per il caso non batched) per associare anche eventuali chunk video
+    // e per rendere l'upload idempotente lato client.
 
     if (isBatched && batchIndex > 0 && isDriveConfigured() && !existingDriveFolderId) {
       return Response.json(
@@ -216,7 +342,7 @@ export default async function handler(request: Request): Promise<Response> {
     }
 
     const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-    const scanId = isBatched ? clientScanId : crypto.randomUUID();
+    const scanId = clientScanId;
     const folderPath = `/scans/${timestamp}`;
 
     let driveUploaded = false;
@@ -263,6 +389,7 @@ export default async function handler(request: Request): Promise<Response> {
     if (isBatched && !isLastBatch) {
       return Response.json({
         status: "partial",
+        mode: "photos",
         scanId,
         path: folderPath,
         receivedCount: validated.length,
@@ -281,6 +408,7 @@ export default async function handler(request: Request): Promise<Response> {
 
     return Response.json({
       status: "success",
+      mode: "photos",
       scanId,
       path: folderPath,
       receivedCount: validated.length,

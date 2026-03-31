@@ -7,7 +7,7 @@ import { STLLoader } from "three/examples/jsm/loaders/STLLoader.js";
 import * as THREE from "three";
 import { X } from "lucide-react";
 import { Button } from "./ui/button";
-import { Dialog, DialogContent } from "./ui/dialog";
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from "./ui/dialog";
 import { cn } from "../lib/utils";
 import type { ShoeCatalogItem } from "../data/shoeCatalog";
 
@@ -279,6 +279,8 @@ export default function VirtualTryOnViewer({
           "data-[state=open]:slide-in-from-bottom-0 data-[state=open]:slide-in-from-left-0 data-[state=open]:zoom-in-100"
         )}
       >
+        <DialogTitle className="sr-only">Prova virtuale</DialogTitle>
+        <DialogDescription className="sr-only">Anteprima calzatura 3D</DialogDescription>
         <div className="relative min-h-0 flex-1 bg-black">
           <video
             ref={videoRef}

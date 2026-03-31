@@ -8,7 +8,7 @@ import NeumaLogo from "../components/NeumaLogo";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
 import { Card, CardContent, CardFooter } from "../components/ui/card";
-import { Dialog, DialogContent } from "../components/ui/dialog";
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from "../components/ui/dialog";
 import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
 import { Slider } from "../components/ui/slider";
@@ -320,6 +320,8 @@ export default function LibraryScreen({ onOpenScanner }: LibraryScreenProps) {
             "data-[state=open]:slide-in-from-bottom-0 data-[state=open]:slide-in-from-left-0 data-[state=open]:zoom-in-100"
           )}
         >
+          <DialogTitle className="sr-only">Dettaglio scansione</DialogTitle>
+          <DialogDescription className="sr-only">Visualizzatore modello 3D piede</DialogDescription>
           <div className="relative flex min-h-0 flex-1 flex-col">
             <div className="absolute left-0 top-0 z-20 flex w-full items-start justify-between p-4">
               <Button
