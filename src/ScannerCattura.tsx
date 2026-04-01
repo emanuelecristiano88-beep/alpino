@@ -13,6 +13,24 @@ import { useScanFrameOrientation } from "./hooks/useScanFrameOrientation";
 import { useFootEraser } from "./hooks/useFootEraser";
 import { FootEraserCanvas } from "./components/scanner/FootEraserCanvas";
 import type { ObservationData } from "./lib/aruco/poseEstimation";
+import { A4_SHEET_DIMS_MM } from "./lib/aruco/sheetDimensions";
+
+/**
+ * Final scan payload sent to the backend for 3D foot model generation.
+ * Serialisable as JSON — all fields are plain numbers / strings / arrays.
+ */
+export interface ScanPayload {
+  schemaVersion: "1.0";
+  /** ISO 8601 timestamp of when the scan was completed. */
+  timestamp: string;
+  /** Physical dimensions of the detected reference sheet. */
+  sheetDimensions: { widthMm: number; heightMm: number };
+  /** One ObservationData record per erased dome point (up to 150). */
+  capturedPoints: ObservationData[];
+  totalPoints: number;
+  /** Elapsed time from first captured point to scan completion (ms). */
+  scanDurationMs: number | null;
+}
 import { ScannerAppleProgress } from "./components/scanner/ScannerAppleProgress";
 import { useScanGuidance } from "./hooks/useScanGuidance";
 import ScannerAlignmentOverlay from "./components/scanner/ScannerAlignmentOverlay";
@@ -589,7 +607,13 @@ export default function ScannerCattura() {
    * for 3D foot reconstruction.
    * Not stored in React state to avoid re-renders on every capture.
    */
-  const capturedDataRef = useRef<ObservationData[]>([]);
+  const capturedDataRef    = useRef<ObservationData[]>([]);
+  /** Finalised scan payload — populated when eraser.isComplete fires. */
+  const scanPayloadRef     = useRef<ScanPayload | null>(null);
+  /** performance.now() of the first captured observation (for duration calc). */
+  const scanStartTimeRef   = useRef<number | null>(null);
+  /** True while the "Invia al Designer" button is in its sending animation. */
+  const [isSendingPayload, setIsSendingPayload] = React.useState(false);
   const lastArucoSeenAtRef = useRef(0);
   const domeFadeStartAtRef = useRef(0);
   const domeOpacityRef = useRef(0);
@@ -1225,24 +1249,39 @@ export default function ScannerCattura() {
     frameTiltRef.current = frameTilt;
   }, [frameTilt]);
 
-  // When all 150 eraser points are consumed → vibrate 200ms → show completion
-  // overlay → capture after 2.8 s (enough time to read the message).
+  // When all 150 eraser points are consumed → haptic → build scanPayload →
+  // show the completion overlay with "Invia al Designer" button.
+  // The user drives the upload by tapping the button (no auto-timer).
   useEffect(() => {
     if (!eraser.isComplete || cameraState !== "readyPhase" || !STARLINK_DOT_CLOUD_MODE) return;
 
     // Haptic confirmation: 200 ms burst
     try { navigator.vibrate(200); } catch (_) { /* not available on all devices */ }
 
-    // Show the elegant overlay (reusing finalCountdown as a binary flag:
-    // value > 0 = overlay is visible, null = hidden)
+    // ── Build the scan payload ─────────────────────────────────────────────
+    const captured   = capturedDataRef.current;
+    const endTime    = performance.now();
+    const startTime  = scanStartTimeRef.current;
+
+    const payload: ScanPayload = {
+      schemaVersion:    "1.0",
+      timestamp:        new Date().toISOString(),
+      sheetDimensions:  { ...A4_SHEET_DIMS_MM },
+      capturedPoints:   [...captured],
+      totalPoints:      captured.length,
+      scanDurationMs:   startTime !== null ? Math.round(endTime - startTime) : null,
+    };
+
+    scanPayloadRef.current = payload;
+
+    console.log(
+      `[NEUMA] scanPayload pronto — ${payload.totalPoints} punti, ` +
+      `durata ${payload.scanDurationMs != null ? (payload.scanDurationMs / 1000).toFixed(1) + "s" : "n/a"}, ` +
+      `foglio ${payload.sheetDimensions.widthMm}×${payload.sheetDimensions.heightMm}mm`,
+    );
+
+    // Show overlay (finalCountdown > 0 = visible)
     setFinalCountdown(1);
-
-    const t = setTimeout(() => {
-      setFinalCountdown(null);
-      void stopAndUploadDotCloud();
-    }, 2800);
-
-    return () => clearTimeout(t);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [eraser.isComplete, cameraState]);
 
@@ -2048,7 +2087,10 @@ export default function ScannerCattura() {
     dotCloudConsumedRef.current = 0;
     dotCloudStartedRef.current = false;
     dotCloudDoneRef.current = false;
-    capturedDataRef.current = [];
+    capturedDataRef.current  = [];
+    scanPayloadRef.current   = null;
+    scanStartTimeRef.current = null;
+    setIsSendingPayload(false);
     setDotCloudProgressPct(0);
     domeFadeStartAtRef.current = 0;
     domeOpacityRef.current = 0;
@@ -4280,7 +4322,12 @@ export default function ScannerCattura() {
         videoRef={videoRef}
         containerRef={videoContainerRef}
         visible={STARLINK_DOT_CLOUD_MODE && cameraState === "readyPhase" && !eraser.isComplete}
-        onPointCaptured={(obs) => { capturedDataRef.current.push(obs); }}
+        onPointCaptured={(obs) => {
+          if (scanStartTimeRef.current === null) {
+            scanStartTimeRef.current = obs.timestamp; // perf.now() from RAF
+          }
+          capturedDataRef.current.push(obs);
+        }}
       />
 
       {/* Apple-style WatchOS progress ring — top-right, Starlink mode only */}
@@ -4504,97 +4551,170 @@ export default function ScannerCattura() {
         </div>
       ) : null}
 
-      {/* ── Completion overlay: "Scansione Completata. Elaborazione Prototipo…" ── */}
+      {/* ── Completion overlay with "Invia al Designer" CTA ────────────────── */}
       {STARLINK_DOT_CLOUD_MODE && finalCountdown !== null ? (
         <div
-          className="pointer-events-none absolute inset-0 z-[115] flex flex-col items-center justify-center gap-6"
+          className="absolute inset-0 z-[115] flex flex-col items-center justify-center gap-7"
           style={{
-            background: "rgba(0,0,0,0.65)",
-            backdropFilter: "blur(22px) saturate(140%)",
-            WebkitBackdropFilter: "blur(22px) saturate(140%)",
+            background: "rgba(0,0,0,0.70)",
+            backdropFilter: "blur(24px) saturate(140%)",
+            WebkitBackdropFilter: "blur(24px) saturate(140%)",
             animation: "sap-fade-in 400ms cubic-bezier(0.22,1,0.36,1) both",
           }}
         >
-          {/* Checkmark ring */}
+          {/* ── Animated checkmark ring ────────────────────────────────────── */}
           <div
             style={{
-              width: 80, height: 80,
+              width: 84, height: 84,
               borderRadius: "50%",
-              border: "3px solid rgba(255,255,255,0.18)",
+              border: "2.5px solid rgba(255,255,255,0.20)",
               background: "rgba(255,255,255,0.06)",
               display: "flex", alignItems: "center", justifyContent: "center",
-              boxShadow: "0 0 40px rgba(255,255,255,0.12)",
-              animation: "sap-pulse 2.2s ease-in-out infinite",
+              boxShadow: "0 0 48px rgba(255,255,255,0.10)",
+              animation: "sap-pulse 2.4s ease-in-out infinite",
             }}
           >
-            <svg
-              width={38} height={38} viewBox="0 0 38 38"
-              fill="none" stroke="white" strokeWidth={2.8}
+            <svg width={40} height={40} viewBox="0 0 40 40"
+              fill="none" stroke="white" strokeWidth={2.6}
               strokeLinecap="round" strokeLinejoin="round"
             >
               <polyline
-                points="7,19 15,27 31,11"
-                strokeDasharray="40"
-                strokeDashoffset="0"
-                style={{ animation: "sap-check-draw 480ms 150ms cubic-bezier(0.22,1,0.36,1) both" }}
+                points="8,20 16,28 32,12"
+                strokeDasharray="42" strokeDashoffset="0"
+                style={{ animation: "sap-check-draw 520ms 120ms cubic-bezier(0.22,1,0.36,1) both" }}
               />
             </svg>
           </div>
 
-          {/* Primary message */}
-          <div
-            style={{
-              fontFamily: "ui-rounded, -apple-system, BlinkMacSystemFont, sans-serif",
-              fontWeight: 700,
-              fontSize: "clamp(22px, 6vw, 28px)",
-              color: "#ffffff",
-              letterSpacing: "-0.4px",
-              textAlign: "center",
-              lineHeight: 1.25,
-              animation: "sap-fade-in 400ms 120ms ease both",
-            }}
-          >
+          {/* ── Primary heading ────────────────────────────────────────────── */}
+          <div style={{
+            fontFamily: "ui-rounded, -apple-system, BlinkMacSystemFont, sans-serif",
+            fontWeight: 700, fontSize: "clamp(22px, 6vw, 28px)",
+            color: "#ffffff", letterSpacing: "-0.4px",
+            textAlign: "center", lineHeight: 1.25,
+            animation: "sap-fade-in 400ms 140ms ease both",
+          }}>
             Scansione Completata
           </div>
 
-          {/* Secondary message with pulsing dots */}
-          <div
-            style={{
-              fontFamily: "ui-rounded, -apple-system, BlinkMacSystemFont, sans-serif",
-              fontWeight: 500,
-              fontSize: "clamp(13px, 3.5vw, 15px)",
-              color: "rgba(255,255,255,0.55)",
-              letterSpacing: "0.04em",
+          {/* ── Scan summary pill ──────────────────────────────────────────── */}
+          {scanPayloadRef.current && (
+            <div style={{
+              fontFamily: "ui-monospace, 'SF Mono', monospace",
+              fontSize: "clamp(11px, 3vw, 13px)",
+              color: "rgba(255,255,255,0.42)",
+              letterSpacing: "0.06em",
               textAlign: "center",
-              animation: "sap-fade-in 400ms 280ms ease both",
-            }}
-          >
-            Elaborazione Prototipo…
-          </div>
+              animation: "sap-fade-in 400ms 220ms ease both",
+            }}>
+              {scanPayloadRef.current.totalPoints} pt
+              {" · "}
+              {scanPayloadRef.current.sheetDimensions.widthMm}
+              ×
+              {scanPayloadRef.current.sheetDimensions.heightMm} mm
+              {scanPayloadRef.current.scanDurationMs !== null
+                ? ` · ${(scanPayloadRef.current.scanDurationMs / 1000).toFixed(1)}s`
+                : ""}
+            </div>
+          )}
 
-          {/* Thin progress bar / shimmer */}
-          <div
-            style={{
-              width: "min(180px, 52vw)",
-              height: 2,
-              borderRadius: 2,
-              background: "rgba(255,255,255,0.10)",
-              overflow: "hidden",
-              animation: "sap-fade-in 400ms 380ms ease both",
+          {/* ── "Invia al Designer" button ─────────────────────────────────── */}
+          <button
+            disabled={isSendingPayload}
+            onClick={() => {
+              if (isSendingPayload) return;
+              setIsSendingPayload(true);
+
+              // Log the full JSON payload to the console for inspection
+              const payload = scanPayloadRef.current;
+              if (payload) {
+                console.log(
+                  "[NEUMA] scanPayload →",
+                  JSON.stringify({
+                    ...payload,
+                    // summarise large array for readability
+                    capturedPoints: `[${payload.capturedPoints.length} ObservationData records]`,
+                  }, null, 2),
+                );
+              }
+
+              // Kick off the actual upload flow, then close overlay
+              stopAndUploadDotCloud().finally(() => {
+                setFinalCountdown(null);
+                setIsSendingPayload(false);
+              }).catch(() => {
+                setIsSendingPayload(false);
+              });
             }}
+            style={{
+              // Pill shape — Apple "filled" CTA style
+              display: "flex", alignItems: "center", justifyContent: "center", gap: 10,
+              paddingTop: 16, paddingBottom: 16,
+              paddingLeft: 40, paddingRight: 40,
+              borderRadius: 999,
+              border: "none", outline: "none", cursor: isSendingPayload ? "default" : "pointer",
+              background: isSendingPayload
+                ? "rgba(255,255,255,0.12)"
+                : "rgba(255,255,255,1)",
+              color: isSendingPayload ? "rgba(255,255,255,0.45)" : "#000000",
+              fontFamily: "ui-rounded, -apple-system, BlinkMacSystemFont, sans-serif",
+              fontWeight: 600,
+              fontSize: "clamp(15px, 4vw, 17px)",
+              letterSpacing: "-0.2px",
+              boxShadow: isSendingPayload
+                ? "none"
+                : "0 4px 32px rgba(255,255,255,0.22), 0 1px 6px rgba(0,0,0,0.18)",
+              transition: "background 280ms ease, color 280ms ease, box-shadow 280ms ease, transform 120ms ease",
+              transform: "scale(1)",
+              WebkitTapHighlightColor: "transparent",
+              animation: "sap-fade-in 480ms 340ms cubic-bezier(0.22,1,0.36,1) both",
+            }}
+            onPointerDown={(e) => { (e.currentTarget as HTMLButtonElement).style.transform = "scale(0.96)"; }}
+            onPointerUp={(e) =>   { (e.currentTarget as HTMLButtonElement).style.transform = "scale(1)"; }}
+            onPointerLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.transform = "scale(1)"; }}
           >
-            <div
-              style={{
-                height: "100%",
-                background:
-                  "linear-gradient(90deg, transparent 0%, rgba(255,255,255,0.7) 50%, transparent 100%)",
-                backgroundSize: "200% 100%",
-                animation: "shimmer 1.4s ease-in-out infinite",
-              }}
-            />
+            {isSendingPayload ? (
+              /* Spinning indicator — inline SVG, no dependency */
+              <>
+                <svg
+                  width={18} height={18} viewBox="0 0 24 24"
+                  fill="none" stroke="rgba(255,255,255,0.6)"
+                  strokeWidth={2.5} strokeLinecap="round"
+                  style={{ animation: "spin 0.9s linear infinite" }}
+                >
+                  <circle cx={12} cy={12} r={10} strokeDasharray="32" strokeDashoffset="10" />
+                </svg>
+                Invio in corso…
+              </>
+            ) : (
+              <>
+                {/* Arrow-right icon */}
+                <svg width={18} height={18} viewBox="0 0 24 24"
+                  fill="none" stroke="currentColor" strokeWidth={2.3}
+                  strokeLinecap="round" strokeLinejoin="round"
+                >
+                  <path d="M5 12h14M13 6l6 6-6 6" />
+                </svg>
+                Invia al Designer
+              </>
+            )}
+          </button>
+
+          {/* ── Subtitle ───────────────────────────────────────────────────── */}
+          <div style={{
+            fontFamily: "ui-rounded, -apple-system, BlinkMacSystemFont, sans-serif",
+            fontWeight: 400, fontSize: "clamp(11px, 3vw, 13px)",
+            color: "rgba(255,255,255,0.30)",
+            letterSpacing: "0.03em", textAlign: "center",
+            animation: "sap-fade-in 400ms 480ms ease both",
+          }}>
+            {isSendingPayload ? "Generazione modello 3D in corso…" : "Pronto per la generazione del modello 3D"}
           </div>
         </div>
       ) : null}
+
+      {/* Inject spin keyframe alongside the existing sap-* animations */}
+      <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
 
       {/* Motion blur nudge — hide for Starlink mode (pure experience) */}
       {!NO_SCANNER_OVERLAYS && !STARLINK_DOT_CLOUD_MODE && cameraState === "readyPhase" && showMotionBlurWarning ? (
