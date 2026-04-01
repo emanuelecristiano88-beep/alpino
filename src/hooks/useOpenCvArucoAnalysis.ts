@@ -56,6 +56,8 @@ export function useOpenCvArucoAnalysis(videoRef: React.RefObject<HTMLVideoElemen
   const pipCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
   const matsRef = useRef<{
+    w: number;
+    h: number;
     rgba: any;
     gray: any;
     bw: any;
@@ -72,6 +74,7 @@ export function useOpenCvArucoAnalysis(videoRef: React.RefObject<HTMLVideoElemen
   const skipUntilRef = useRef(0);
   const lastPipAtRef = useRef(0);
   const lastLogAtRef = useRef(0);
+  const fatalStopRef = useRef(false);
 
   const cv = (typeof window !== "undefined" ? (window as any).cv : null) as any;
 
@@ -100,13 +103,9 @@ export function useOpenCvArucoAnalysis(videoRef: React.RefObject<HTMLVideoElemen
     // Init outside loop (singleton mats/params/dictionary).
     if (!matsRef.current) {
       try {
-        // Pre-allocate stable Mats at analysis resolution.
-        const rgba = new cv.Mat(480, 640, cv.CV_8UC4);
-        const gray = new cv.Mat(480, 640, cv.CV_8UC1);
-        const bw = new cv.Mat(480, 640, cv.CV_8UC1);
-        // Capture source will be the analysis canvas (stable 640x480).
-        if (!analysisCanvasRef.current) analysisCanvasRef.current = document.createElement("canvas");
-        const cap = new cv.VideoCapture(analysisCanvasRef.current);
+        // NOTE: real init happens in the RAF loop once we know video dimensions.
+        // eslint-disable-next-line no-console
+        console.log("ARUCO MODULE STATUS:", !!cv?.aruco);
         const corners = new cv.MatVector();
         const ids = new cv.Mat();
         const rejected = new cv.MatVector();
@@ -117,7 +116,19 @@ export function useOpenCvArucoAnalysis(videoRef: React.RefObject<HTMLVideoElemen
           if ("adaptiveThreshWinSizeStep" in params) params.adaptiveThreshWinSizeStep = 4;
           if ("cornerRefinementMethod" in params) params.cornerRefinementMethod = cv.aruco.CORNER_REFINE_SUBPIX;
         }
-        matsRef.current = { rgba, gray, bw, cap, corners, ids, rejected, dict, params };
+        matsRef.current = {
+          w: 0,
+          h: 0,
+          rgba: null,
+          gray: null,
+          bw: null,
+          cap: null,
+          corners,
+          ids,
+          rejected,
+          dict,
+          params,
+        };
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         liveRef.current = { ...liveRef.current, status: "error", error: msg };
@@ -154,23 +165,26 @@ export function useOpenCvArucoAnalysis(videoRef: React.RefObject<HTMLVideoElemen
       if (busyRef.current) return;
       if (t < skipUntilRef.current) return;
       const video = videoRef.current;
-      // VIDEO READY CHECK: wait for HAVE_ENOUGH_DATA.
-      if (!video || video.readyState !== 4 || !video.videoWidth) return;
+      // VIDEO READY CHECK: on Android it may never reach 4, so accept >= 3.
+      if (!video || video.readyState < 3) return;
+      if (!video.videoWidth || !video.videoHeight) return;
       const now = performance.now();
+
+      if (fatalStopRef.current) return;
 
       // FPS heartbeat: update even while loading / missing cv.
       const dt = fpsRef.current.lastAt > 0 ? now - fpsRef.current.lastAt : 0;
       fpsRef.current.lastAt = now;
       fpsRef.current.fps = dt > 0 ? Math.max(0, Math.min(999, 1000 / dt)) : 0;
 
+      // CRITICAL LOG (max 1/sec)
+      if (now - lastLogAtRef.current > 1000) {
+        lastLogAtRef.current = now;
+        // eslint-disable-next-line no-console
+        console.log("Check - CV:", !!(window as any).cv, "ArUco:", !!(window as any).cv?.aruco, "VideoWidth:", video.videoWidth);
+      }
+
       if (!cv || typeof cv.Mat !== "function") {
-        if (now - lastLogAtRef.current > 1000) {
-          lastLogAtRef.current = now;
-          // eslint-disable-next-line no-console
-          console.log("Loop attivo - Status:", status);
-          // eslint-disable-next-line no-console
-          console.log("CV non trovato nel loop");
-        }
         const next: OpenCvArucoSnapshot = {
           ...liveRef.current,
           status: enabled ? "loading" : "loading",
@@ -187,12 +201,28 @@ export function useOpenCvArucoAnalysis(videoRef: React.RefObject<HTMLVideoElemen
         return;
       }
 
+      // STOP THE GHOST: fatal if camera not anchored or ArUco missing.
+      if (!video.videoWidth || !video.videoHeight || !cv?.aruco) {
+        const msg = !cv?.aruco
+          ? "ERRORE: FOTOCAMERA NON AGGANCIATA O MODULO ARUCO MANCANTE (cv.aruco=false)"
+          : "ERRORE: FOTOCAMERA NON AGGANCIATA O MODULO ARUCO MANCANTE (videoWidth=0)";
+        fatalStopRef.current = true;
+        const next: OpenCvArucoSnapshot = {
+          ...liveRef.current,
+          status: "error",
+          error: msg,
+          analysisFps: fpsRef.current.fps,
+          detectMs: 0,
+          markerCount: 0,
+          idsRaw: [],
+          quadsNorm: [],
+        };
+        liveRef.current = next;
+        setSnapshot(next);
+        return;
+      }
+
       if (status !== "ready") {
-        if (now - lastLogAtRef.current > 1000) {
-          lastLogAtRef.current = now;
-          // eslint-disable-next-line no-console
-          console.log("Loop attivo - Status:", status);
-        }
         const next: OpenCvArucoSnapshot = {
           ...liveRef.current,
           status,
@@ -236,8 +266,21 @@ export function useOpenCvArucoAnalysis(videoRef: React.RefObject<HTMLVideoElemen
 
       const m = matsRef.current;
       if (!m) return;
-      const w = 640;
-      const h = 480;
+
+      // DIMENSION ENFORCEMENT: set analysis size based on video dimensions (capped).
+      const vw = video.videoWidth;
+      const vh = video.videoHeight;
+      const maxW = 640;
+      const maxH = 480;
+      let w = Math.min(maxW, Math.max(160, vw));
+      let h = Math.round((w * vh) / vw);
+      if (h > maxH) {
+        h = maxH;
+        w = Math.round((h * vw) / vh);
+      }
+      w = Math.max(160, Math.min(maxW, w));
+      h = Math.max(120, Math.min(maxH, h));
+
       if (!analysisCanvasRef.current) analysisCanvasRef.current = document.createElement("canvas");
       const canvas = analysisCanvasRef.current;
       if (canvas.width !== w || canvas.height !== h) {
@@ -249,6 +292,38 @@ export function useOpenCvArucoAnalysis(videoRef: React.RefObject<HTMLVideoElemen
       busyRef.current = true;
 
       try {
+        // (Re)allocate Mats + VideoCapture when size changes or first run.
+        if (!m.cap || m.w !== w || m.h !== h || !m.rgba || !m.gray || !m.bw) {
+          try {
+            m.rgba?.delete?.();
+            m.gray?.delete?.();
+            m.bw?.delete?.();
+          } catch {}
+          try {
+            m.rgba = new cv.Mat(h, w, cv.CV_8UC4);
+            m.gray = new cv.Mat(h, w, cv.CV_8UC1);
+            m.bw = new cv.Mat(h, w, cv.CV_8UC1);
+            m.cap = new cv.VideoCapture(canvas);
+            m.w = w;
+            m.h = h;
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            const next: OpenCvArucoSnapshot = {
+              ...liveRef.current,
+              status: "error",
+              error: `Mat allocation failed: ${msg}`,
+              analysisFps: fpsRef.current.fps,
+              detectMs: 0,
+              markerCount: 0,
+              idsRaw: [],
+              quadsNorm: [],
+            };
+            liveRef.current = next;
+            setSnapshot(next);
+            return;
+          }
+        }
+
         // THE CAPTURE: draw video into analysis canvas, then cap.read(rgba).
         drawCover(ctx, video, w, h);
         try {
@@ -275,7 +350,8 @@ export function useOpenCvArucoAnalysis(videoRef: React.RefObject<HTMLVideoElemen
         m.rejected = new cv.MatVector();
         m.ids = new cv.Mat();
         const t0 = performance.now();
-        cv.aruco.detectMarkers(m.bw, m.dict, m.corners, m.ids, m.params, m.rejected);
+        // COLOR CONVERSION path: run on grayscale (often more robust on Android)
+        cv.aruco.detectMarkers(m.gray, m.dict, m.corners, m.ids, m.params, m.rejected);
         const t1 = performance.now();
 
         const detectMs = t1 - t0;
@@ -310,7 +386,19 @@ export function useOpenCvArucoAnalysis(videoRef: React.RefObject<HTMLVideoElemen
           pipCanvas = pipCanvasRef.current;
           pipCanvas.width = 160;
           pipCanvas.height = 120;
-          cv.imshow(pipCanvas, m.bw);
+          // CANVAS VISUALIZER + HEARTBEAT: draw a blinking blue rect using OpenCV, then show RGBA.
+          try {
+            const blink = Math.floor(now / 350) % 2 === 0;
+            if (blink) {
+              const p1 = new cv.Point(10, 10);
+              const p2 = new cv.Point(Math.min(m.w - 10, 110), Math.min(m.h - 10, 70));
+              const blue = new cv.Scalar(40, 120, 255, 255);
+              cv.rectangle(m.rgba, p1, p2, blue, 3);
+            }
+          } catch {
+            // ignore
+          }
+          cv.imshow(pipCanvas, m.rgba);
           // DRAW OVERLAY: red marker quads over the pip for "sign of life".
           try {
             const pctx = pipCanvas.getContext("2d");
