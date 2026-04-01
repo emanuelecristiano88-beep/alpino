@@ -1,4 +1,4 @@
-let Module = {};
+let Module = (typeof window !== 'undefined' && window.Module) ? window.Module : {};
 let opencvWasmBinaryFile = './opencv.wasm';
 
 (function(root, factory) {

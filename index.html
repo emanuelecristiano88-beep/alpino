@@ -41,7 +41,9 @@
       />
     </noscript>
     <script>
-      window.__opencv_boot = { errors: [], jsLoaded: false };
+      // OpenCV "old school" boot: preload wasmBinary BEFORE loading opencv.js.
+      window.__opencv_boot = { errors: [], jsLoaded: false, wasmLoaded: false };
+
       window.addEventListener(
         "error",
         (e) => {
@@ -64,19 +66,54 @@
         },
         true
       );
+
       window.cvReady = false;
       window.Module = {
-        onRuntimeInitialized: function () {
-          window.cvReady = true;
-          console.log("OPENCV WASM: FULLY INITIALIZED");
-        },
         locateFile: function (path) {
           if (path && path.endsWith(".wasm")) return "/opencv_js.wasm";
           return path;
         },
+        onRuntimeInitialized: function () {
+          window.cvReady = true;
+          console.log("OpenCV con WASM Binary: PRONTO!");
+        },
       };
+
+      (async function bootOpenCv() {
+        try {
+          const res = await fetch("/opencv_js.wasm", { cache: "no-store" });
+          if (!res.ok) throw new Error("WASM fetch " + res.status);
+          const buf = await res.arrayBuffer();
+          // Emscripten accepts ArrayBuffer or Uint8Array; Uint8Array is safest.
+          window.Module.wasmBinary = new Uint8Array(buf);
+          window.__opencv_boot.wasmLoaded = true;
+        } catch (e) {
+          try {
+            const msg = e && e.message ? e.message : String(e);
+            window.__opencv_boot.errors.push("WASM preload: " + msg);
+          } catch {}
+        }
+
+        try {
+          const s = document.createElement("script");
+          s.src = "/opencv.js?v=20260401";
+          s.type = "text/javascript";
+          s.async = false;
+          s.onload = function () {
+            window.__opencv_boot.jsLoaded = true;
+          };
+          s.onerror = function () {
+            window.__opencv_boot.errors.push("JS load error: /opencv.js");
+          };
+          document.head.appendChild(s);
+        } catch (e) {
+          try {
+            const msg = e && e.message ? e.message : String(e);
+            window.__opencv_boot.errors.push("JS inject: " + msg);
+          } catch {}
+        }
+      })();
     </script>
-    <script src="/opencv.js?v=20260401" type="text/javascript" onload="window.__opencv_boot.jsLoaded=true"></script>
     <script>
       console.log("Controllo manuale OpenCV...");
       setTimeout(() => {
@@ -85,16 +122,17 @@
         } else {
           const extra =
             (window.__opencv_boot && window.__opencv_boot.errors && window.__opencv_boot.errors.length)
-              ? "\n" + window.__opencv_boot.errors.slice(-3).join("\n")
+              ? "\n" + window.__opencv_boot.errors.slice(-4).join("\n")
               : "";
           alert(
             "ERRORE CRITICO: opencv.js non ha esposto window.cv.\n" +
               "jsLoaded=" + String(!!(window.__opencv_boot && window.__opencv_boot.jsLoaded)) +
+              " wasmLoaded=" + String(!!(window.__opencv_boot && window.__opencv_boot.wasmLoaded)) +
               " cvReady=" + String(!!window.cvReady) +
               extra
           );
         }
-      }, 5000);
+      }, 6000);
     </script>
     <title>NEUMA</title>
   </head>
