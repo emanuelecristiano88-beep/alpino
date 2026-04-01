@@ -49,11 +49,66 @@ const C_IDLE     = "rgba(255, 255, 255, 0.65)";
 const C_SCAN     = "rgba(251, 191, 36,  0.92)";
 const C_SCAN_GLOW= "rgba(251, 191, 36,  0.22)";
 const C_DYING    = "rgba(255, 255, 255, 1)";
-const C_MIRINO   = "rgba(255, 255, 255, 0.80)";
-const C_MIRINO_LO= "rgba(255, 255, 255, 0.30)"; // dim when tracking lost
+const C_MIRINO       = "rgba(255, 255, 255, 0.80)";
+const C_MIRINO_GHOST = "rgba(255, 255, 255, 0.52)"; // dimmed during ghost window
+const C_MIRINO_LO    = "rgba(255, 255, 255, 0.28)"; // very dim when fully lost
 
-// How long (ms) without ≥ 4 markers before hiding dome dots
-const HIDE_AFTER_LOST_MS = 450;
+/**
+ * After tracking loss, keep the last smoothed pose and continue projecting
+ * dots at their ghost position for this many milliseconds.
+ * At 500 ms the dome disappears so the user knows tracking is gone.
+ */
+const GHOST_MS = 500;
+
+/**
+ * EMA blending factor: weight of the *new* raw pose each frame.
+ * 0 = frozen, 1 = no smoothing.
+ * 0.40 → ~2.5-frame lag at 30 fps (≈ 83 ms) — smooth without feeling sluggish.
+ */
+const SMOOTH_ALPHA = 0.40;
+
+// ─── Math helpers ─────────────────────────────────────────────────────────────
+
+type Vec3 = [number, number, number];
+
+/**
+ * Re-orthonormalize a 3×3 rotation matrix stored row-major after EMA blending.
+ *
+ * EMA averaging of R matrix elements produces a matrix that is no longer
+ * exactly orthonormal (columns may not be unit vectors / mutually perpendicular).
+ * Gram-Schmidt on the first two columns restores the SO(3) constraint, keeping
+ * the result numerically valid for projection.
+ *
+ * Layout: R[row*3 + col], columns = world-X, world-Y, world-Z in camera space.
+ */
+function orthonormalize(R: number[]): number[] {
+  // Extract first two columns
+  const c0: Vec3 = [R[0], R[3], R[6]];
+  const c1: Vec3 = [R[1], R[4], R[7]];
+
+  // Gram-Schmidt step 1: normalize c0
+  const n0 = Math.sqrt(c0[0] ** 2 + c0[1] ** 2 + c0[2] ** 2) || 1;
+  const nc0: Vec3 = [c0[0] / n0, c0[1] / n0, c0[2] / n0];
+
+  // Gram-Schmidt step 2: remove nc0 component from c1, then normalize
+  const dot = c1[0] * nc0[0] + c1[1] * nc0[1] + c1[2] * nc0[2];
+  const c1o: Vec3 = [c1[0] - dot * nc0[0], c1[1] - dot * nc0[1], c1[2] - dot * nc0[2]];
+  const n1 = Math.sqrt(c1o[0] ** 2 + c1o[1] ** 2 + c1o[2] ** 2) || 1;
+  const nc1: Vec3 = [c1o[0] / n1, c1o[1] / n1, c1o[2] / n1];
+
+  // Third column = cross(nc0, nc1) — guaranteed unit length and orthogonal
+  const nc2: Vec3 = [
+    nc0[1] * nc1[2] - nc0[2] * nc1[1],
+    nc0[2] * nc1[0] - nc0[0] * nc1[2],
+    nc0[0] * nc1[1] - nc0[1] * nc1[0],
+  ];
+
+  return [
+    nc0[0], nc1[0], nc2[0],
+    nc0[1], nc1[1], nc2[1],
+    nc0[2], nc1[2], nc2[2],
+  ];
+}
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -117,7 +172,8 @@ function drawDebugBox(
   canvasH: number,
   fps: number,
   markerCount: number,
-  trackingOk: boolean,
+  /** "● LIVE" | "◐ GHOST" | "○ LOST" */
+  trackingLabel: string,
   consumed: number,
 ) {
   const PAD   = 10;
@@ -130,7 +186,7 @@ function drawDebugBox(
   const lines = [
     `FPS: ${fps.toFixed(1)}`,
     `MARKERS: ${markerCount}`,
-    `TRACKING: ${trackingOk ? "● LIVE" : "○ LOST"}`,
+    `TRACKING: ${trackingLabel}`,
     `SCANNED: ${consumed}/150`,
   ];
 
@@ -150,8 +206,9 @@ function drawDebugBox(
   ctx.roundRect(bx, by, boxW, boxH, 8);
   ctx.fill();
 
-  // Text
-  ctx.fillStyle = trackingOk ? "rgba(255,255,255,0.85)" : "rgba(255,200,100,0.85)";
+  // Text — amber tint when ghost/lost so the user knows tracking is degraded
+  const isLive = trackingLabel.startsWith("●");
+  ctx.fillStyle = isLive ? "rgba(255,255,255,0.85)" : "rgba(255,200,100,0.85)";
   for (let i = 0; i < lines.length; i++) {
     ctx.fillText(lines[i], bx + PAD, by + PAD + (i + 0.8) * LINE);
   }
@@ -184,8 +241,13 @@ export function FootEraserCanvas({
   /** Temporary array of points executing their 250 ms death animation. */
   const animatingPointsRef    = useRef<AnimatingPoint[]>([]);
   const lastSeenMarkersRef    = useRef<number>(0);
-  const quadsRef           = useRef<OpenCvArucoQuad[]>(markerQuads);
-  const fpsRef             = useRef<FpsClock>({ lastAt: 0, fps: 0, framesSince: 0, lastCalcAt: 0 });
+  /**
+   * EMA-smoothed camera pose. Updated every frame with live tracking.
+   * Kept stale during ghost window so dots don't jump on brief tracking loss.
+   */
+  const smoothedPoseRef       = useRef<import("@/lib/aruco/poseEstimation").CameraPose | null>(null);
+  const quadsRef              = useRef<OpenCvArucoQuad[]>(markerQuads);
+  const fpsRef                = useRef<FpsClock>({ lastAt: 0, fps: 0, framesSince: 0, lastCalcAt: 0 });
 
   useEffect(() => { quadsRef.current = markerQuads; }, [markerQuads]);
 
@@ -236,22 +298,56 @@ export function FootEraserCanvas({
       const hasTracking = quads.length >= 4 && videoW > 0 && videoH > 0;
 
       if (hasTracking) lastSeenMarkersRef.current = now;
-      const trackingAge = now - lastSeenMarkersRef.current;
-      const trackingOk  = trackingAge < HIDE_AFTER_LOST_MS;
+      const trackingAge  = now - lastSeenMarkersRef.current;
+      // "live"  = markers detected this frame
+      // "ghost" = lost < GHOST_MS ago → hold last pose, no new erasure
+      // "lost"  = stale beyond GHOST_MS → hide dome
+      const trackingLive  = hasTracking;
+      const trackingGhost = !trackingLive && trackingAge < GHOST_MS;
+      const trackingOk    = trackingLive || trackingGhost; // dome visible either way
 
-      // ── 2. Project dome points (only when tracking) ───────────────────────
-      let projectedAll: { id: number; sx: number; sy: number }[] = [];
-      if (trackingOk) {
-        const K    = estimateCameraIntrinsics(w, h);
-        const pose = hasTracking
-          ? estimatePoseFromQuads(quads, videoW, videoH, w, h, K)
-          : null;
-        if (pose) {
-          projectedAll = projectDomePoints(eraser.remainingPoints, pose, K, w, h);
+      // ── 2. EMA pose smoothing ─────────────────────────────────────────────
+      //
+      // Every live frame: blend raw pose into smoothedPoseRef with SMOOTH_ALPHA.
+      // Re-orthonormalize so R stays a valid rotation matrix after blending.
+      // During ghost: reuse stale smoothedPoseRef as-is (no update).
+      const K = estimateCameraIntrinsics(w, h);
+
+      if (trackingLive) {
+        const rawPose = estimatePoseFromQuads(quads, videoW, videoH, w, h, K);
+        if (rawPose) {
+          const prev = smoothedPoseRef.current;
+          if (!prev) {
+            // Cold start: accept the first pose without blending
+            smoothedPoseRef.current = rawPose;
+          } else {
+            const α = SMOOTH_ALPHA;
+            const β = 1 - α;
+            // Blend R (9 elements) and t (3 elements)
+            const blendedR = prev.R.map((v, i) => β * v + α * rawPose.R[i]);
+            const blendedT: [number, number, number] = [
+              β * prev.t[0] + α * rawPose.t[0],
+              β * prev.t[1] + α * rawPose.t[1],
+              β * prev.t[2] + α * rawPose.t[2],
+            ];
+            // Re-orthonormalize R to keep it a valid rotation matrix
+            smoothedPoseRef.current = { R: orthonormalize(blendedR), t: blendedT };
+          }
         }
       }
 
-      // ── 3. Classify dots: done / scanning / idle ──────────────────────────
+      // ── 3. Project dome points using smoothed (or ghost) pose ─────────────
+      let projectedAll: { id: number; sx: number; sy: number }[] = [];
+      if (trackingOk && smoothedPoseRef.current) {
+        projectedAll = projectDomePoints(eraser.remainingPoints, smoothedPoseRef.current, K, w, h);
+      }
+
+      // ── 4. Classify dots: done / scanning / idle ──────────────────────────
+      //
+      // Erasure (mirino hit detection) only fires when tracking is LIVE.
+      // During the ghost window the dome is frozen at the last known position
+      // and we do not consume new points — prevents spurious captures while
+      // the user is mid-movement and markers briefly disappear.
       const doneIds:  number[]              = [];
       const scanIds:  number[]              = [];
       const idleDots: typeof projectedAll   = [];
@@ -259,13 +355,13 @@ export function FootEraserCanvas({
 
       for (const dot of projectedAll) {
         const d2 = (dot.sx - cx) ** 2 + (dot.sy - cy) ** 2;
-        if (d2 <= MIRINO_RADIUS_PX ** 2) {
+        if (trackingLive && d2 <= MIRINO_RADIUS_PX ** 2) {
           doneIds.push(dot.id);
           // Queue in animatingPoints before consuming (supplies screen coords for animation)
           if (!animatingPointsRef.current.some((a) => a.id === dot.id)) {
             animatingPointsRef.current.push({ id: dot.id, sx: dot.sx, sy: dot.sy, diedAt: now });
           }
-        } else if (d2 <= SCAN_RADIUS_PX ** 2) {
+        } else if (trackingLive && d2 <= SCAN_RADIUS_PX ** 2) {
           scanIds.push(dot.id);
           scanDots.push(dot);
         } else {
@@ -283,8 +379,8 @@ export function FootEraserCanvas({
         (p) => now - p.diedAt < DYING_MS,
       );
 
-      // ── 4. Draw outer scanning ring (faint amber) ─────────────────────────
-      if (trackingOk) {
+      // ── 5. Draw outer scanning ring (faint amber) ─────────────────────────
+      if (trackingLive) {  // only when markers are present — ghost mode hides the guide ring
         ctx.save();
         ctx.setLineDash([7, 6]);
         ctx.lineWidth   = 1;
@@ -295,7 +391,7 @@ export function FootEraserCanvas({
         ctx.restore();
       }
 
-      // ── 5. Idle dots — white translucent ─────────────────────────────────
+      // ── 6. Idle dots — white translucent ─────────────────────────────────
       ctx.fillStyle = C_IDLE;
       for (const dot of idleDots) {
         ctx.beginPath();
@@ -303,7 +399,7 @@ export function FootEraserCanvas({
         ctx.fill();
       }
 
-      // ── 6. Scanning dots — amber + glow ──────────────────────────────────
+      // ── 7. Scanning dots — amber + glow ──────────────────────────────────
       for (const dot of scanDots) {
         ctx.beginPath();
         ctx.arc(dot.sx, dot.sy, DOT_R_SCAN + 5, 0, Math.PI * 2);
@@ -315,7 +411,7 @@ export function FootEraserCanvas({
         ctx.fill();
       }
 
-      // ── 7. animatingPoints — ease-out contraction + fade (250 ms) ────────
+      // ── 8. animatingPoints — ease-out contraction + fade (250 ms) ────────
       //
       // t = 1 → 0 as the point ages toward its death.
       //
@@ -347,15 +443,28 @@ export function FootEraserCanvas({
         ctx.restore();
       }
 
-      // ── 8. Mirino (targeting reticle) — always visible ───────────────────
-      drawMirino(ctx, cx, cy, MIRINO_RADIUS_PX, trackingOk ? C_MIRINO : C_MIRINO_LO);
+      // ── 9. Mirino (targeting reticle) — always visible ───────────────────
+      //   LIVE  → full white (C_MIRINO)
+      //   GHOST → half-dim (C_MIRINO_GHOST) — dots frozen, no new erasure
+      //   LOST  → very dim (C_MIRINO_LO)
+      const mirinoColor = trackingLive
+        ? C_MIRINO
+        : trackingGhost
+          ? C_MIRINO_GHOST
+          : C_MIRINO_LO;
+      drawMirino(ctx, cx, cy, MIRINO_RADIUS_PX, mirinoColor);
 
-      // ── 9. Debug box — bottom-left, always on ────────────────────────────
+      // ── 10. Debug box — bottom-left, always on ────────────────────────────
+      const trackingLabel = trackingLive
+        ? "● LIVE"
+        : trackingGhost
+          ? "◐ GHOST"
+          : "○ LOST";
       drawDebugBox(
         ctx, w, h,
         clk.fps,
         quads.length,
-        trackingOk,
+        trackingLabel,
         eraser.totalConsumed,
       );
 
