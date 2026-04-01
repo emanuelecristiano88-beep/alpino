@@ -625,7 +625,10 @@ export default function ScannerCattura() {
       const cv = (window as any).cv;
       if (!cv) {
         setOpenCvStatus("error");
-        setOpenCvError("ERRORE: window.cv non trovato nel DOM");
+        const boot = (window as any).__opencv_boot;
+        const errs = boot?.errors?.length ? String(boot.errors.slice(-3).join(" | ")) : "";
+        const loaded = boot ? String(!!boot.jsLoaded) : "n/a";
+        setOpenCvError(`ERRORE: window.cv non trovato nel DOM (jsLoaded=${loaded}${errs ? `; ${errs}` : ""})`);
       }
     }, 5000);
     return () => {

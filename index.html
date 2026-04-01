@@ -41,6 +41,29 @@
       />
     </noscript>
     <script>
+      window.__opencv_boot = { errors: [], jsLoaded: false };
+      window.addEventListener(
+        "error",
+        (e) => {
+          try {
+            const msg = (e && e.message) || "script error";
+            const src = e && e.filename ? ` @ ${e.filename}:${e.lineno || 0}` : "";
+            window.__opencv_boot.errors.push(`JS error: ${msg}${src}`);
+          } catch {}
+        },
+        true
+      );
+      window.addEventListener(
+        "unhandledrejection",
+        (e) => {
+          try {
+            const r = e && e.reason;
+            const msg = r && r.message ? r.message : String(r || "unhandled rejection");
+            window.__opencv_boot.errors.push(`Promise: ${msg}`);
+          } catch {}
+        },
+        true
+      );
       window.cvReady = false;
       window.Module = {
         onRuntimeInitialized: function () {
@@ -53,14 +76,23 @@
         },
       };
     </script>
-    <script src="/opencv.js" type="text/javascript"></script>
+    <script src="/opencv.js?v=20260401" type="text/javascript" onload="window.__opencv_boot.jsLoaded=true"></script>
     <script>
       console.log("Controllo manuale OpenCV...");
       setTimeout(() => {
         if (window.cv) {
           console.log("CV trovato!");
         } else {
-          alert("ERRORE CRITICO: Il browser ha scaricato opencv.js ma non lo ha eseguito. Prova a ricaricare.");
+          const extra =
+            (window.__opencv_boot && window.__opencv_boot.errors && window.__opencv_boot.errors.length)
+              ? "\n" + window.__opencv_boot.errors.slice(-3).join("\n")
+              : "";
+          alert(
+            "ERRORE CRITICO: opencv.js non ha esposto window.cv.\n" +
+              "jsLoaded=" + String(!!(window.__opencv_boot && window.__opencv_boot.jsLoaded)) +
+              " cvReady=" + String(!!window.cvReady) +
+              extra
+          );
         }
       }, 5000);
     </script>
