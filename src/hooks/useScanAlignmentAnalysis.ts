@@ -7,7 +7,7 @@ import {
   type ArucoMarkerDetection,
 } from "../lib/aruco/a4MarkerGeometry";
 import { markerSharpnessScore } from "../lib/scanner/frameQuality";
-import { detectArucoOnImageData, ensureArucoDetector, isArucoDetectorReady } from "../lib/aruco/arucoWasm";
+import { ALL_DICTIONARIES, detectArucoOnImageDataFastBruteforce, ensureArucoDetector, getArucoWasmUrl, isArucoDetectorReady } from "../lib/aruco/arucoWasm";
 import { buildFootBinaryMaskAi } from "../lib/biometry/footMask";
 import { extractFootMaskGeometry, type FootViewZoneMetrics } from "../lib/scanner/footMaskGeometry";
 import {
@@ -40,7 +40,9 @@ export type ScanAlignmentSnapshot = {
   /** 4 marker + rapporto ~A4 + piede + non troppo vicino */
   isPositionCorrect: boolean;
   /** Stato motore ArUco (per debug UI opzionale) */
-  arucoEngine: "loading" | "ready" | "fallback";
+  arucoEngine: "loading" | "ready" | "fallback" | "error";
+  /** Se il motore ArUco fallisce, motivo sintetico per UI */
+  arucoInitError: string | null;
   /**
    * Fino a 4 centroidi normalizzati 0–1 sul frame analizzato (stesso aspect del video).
    * Solo con WASM ArUco attivo e ≥4 marker scelti agli angoli.
@@ -81,6 +83,18 @@ export type ScanAlignmentSnapshot = {
    * Debug: centro marker per ID foglio; da rilevamento diretto (non da ordine “picked”).
    */
   arucoSlotCentersNorm: readonly [null | { x: number; y: number }, null | { x: number; y: number }, null | { x: number; y: number }, null | { x: number; y: number }];
+  /** FPS effettivi del ciclo analisi (non UI render). */
+  analysisFps: number;
+  /** Mini debug view (b/n) dell'analysis buffer. */
+  analysisPreviewCanvas: HTMLCanvasElement | null;
+  /** Tempo ultimo detect ArUco (ms) */
+  arucoDetectMs: number;
+  /** Errore ultimo detect ArUco (se presente) */
+  arucoDetectError: string | null;
+  /** Dizionario che ha agganciato (brute force) */
+  arucoDictionary: string | null;
+  /** ID grezzi visti (anche fuori 0..3) */
+  arucoIdsRaw: number[];
 };
 
 const DEFAULT_TRACKING: StableTrackingState = {
@@ -96,6 +110,7 @@ const DEFAULT_SNAPSHOT: ScanAlignmentSnapshot = {
   footInFrame: false,
   isPositionCorrect: false,
   arucoEngine: "loading",
+  arucoInitError: null,
   markerCentersNorm: null,
   markerCount: 0,
   markerIdsDetected: [],
@@ -110,9 +125,69 @@ const DEFAULT_SNAPSHOT: ScanAlignmentSnapshot = {
   a4GeometryOk: false,
   arucoMarkerQuadsNorm: [],
   arucoSlotCentersNorm: [null, null, null, null],
+  analysisFps: 0,
+  analysisPreviewCanvas: null,
+  arucoDetectMs: 0,
+  arucoDetectError: null,
+  arucoDictionary: null,
+  arucoIdsRaw: [],
 };
 
 const EMPTY_ARUCO_SLOTS: ScanAlignmentSnapshot["arucoSlotCentersNorm"] = [null, null, null, null];
+
+function thresholdForAruco(imageData: ImageData): ImageData {
+  // Hard B/W threshold on analysis buffer to fight reflections.
+  const { width, height, data } = imageData;
+  const out = new Uint8ClampedArray(data.length);
+  let sum = 0;
+  const n = (data.length / 4) | 0;
+  for (let i = 0; i < data.length; i += 4) {
+    sum += 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+  }
+  const mean = n > 0 ? sum / n : 128;
+  const thr = Math.max(40, Math.min(220, mean * 0.92));
+  for (let i = 0; i < data.length; i += 4) {
+    const y = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+    const bw = y >= thr ? 255 : 0;
+    out[i] = bw;
+    out[i + 1] = bw;
+    out[i + 2] = bw;
+    out[i + 3] = 255;
+  }
+  return new ImageData(out, width, height);
+}
+
+function drawCover(
+  ctx: CanvasRenderingContext2D,
+  video: HTMLVideoElement,
+  dw: number,
+  dh: number
+) {
+  const vw = video.videoWidth;
+  const vh = video.videoHeight;
+  if (!vw || !vh) return;
+  // cover crop to match 4:3 analysis canvas without distortion
+  const videoAspect = vw / vh;
+  const targetAspect = dw / dh;
+  let sx = 0;
+  let sy = 0;
+  let sw = vw;
+  let sh = vh;
+  if (videoAspect > targetAspect) {
+    // wider video: crop left/right
+    sh = vh;
+    sw = Math.round(vh * targetAspect);
+    sx = Math.round((vw - sw) / 2);
+    sy = 0;
+  } else {
+    // taller video: crop top/bottom
+    sw = vw;
+    sh = Math.round(vw / targetAspect);
+    sx = 0;
+    sy = Math.round((vh - sh) / 2);
+  }
+  ctx.drawImage(video, sx, sy, sw, sh, 0, 0, dw, dh);
+}
 
 function buildArucoDebugFromMarkers(
   markers: ArucoMarkerDetection[],
@@ -474,6 +549,8 @@ function inferMissingArucoCornerById(
 
 export type ScanAlignmentResult = ScanAlignmentSnapshot & {
   stableAlignedMs: number;
+  /** Snapshot live (mutabile) per bypass React re-render */
+  liveRef: React.MutableRefObject<ScanAlignmentSnapshot>;
 };
 
 /** Hold geometria lastReliable quando la detection salta (allineato al hold stato overlay) */
@@ -841,6 +918,8 @@ export function useScanAlignmentAnalysis(
     ...DEFAULT_SNAPSHOT,
     arucoEngine: "loading",
   });
+  const liveRef = useRef<ScanAlignmentSnapshot>({ ...DEFAULT_SNAPSHOT, arucoEngine: "loading" });
+  const reactCommitLastAtRef = useRef(0);
   const [stableAlignedMs, setStableAlignedMs] = useState(0);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const alignedSinceRef = useRef<number | null>(null);
@@ -858,6 +937,16 @@ export function useScanAlignmentAnalysis(
   const cachedDetectionRef = useRef<{ atMs: number; next: ScanAlignmentSnapshot } | null>(null);
   /** Timestamp dell’ultimo frame con almeno un marker ArUco rilevato (solo mentre engine è 'ready'). */
   const lastArucoMarkerSeenAtRef = useRef<number | null>(null);
+  const analysisFpsRef = useRef<{ lastAtMs: number; fps: number }>({ lastAtMs: 0, fps: 0 });
+  const analysisBwRef = useRef<ImageData | null>(null);
+  const analysisBwInvRef = useRef<ImageData | null>(null);
+  const analysisPreviewCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const analysisPreviewLastAtRef = useRef(0);
+  const analysisBusyRef = useRef(false);
+  const analysisSkipUntilRef = useRef(0);
+  const arucoDetectMsRef = useRef(0);
+  const arucoDetectErrRef = useRef<string | null>(null);
+  const arucoDictRef = useRef<string | null>(null);
   const stableRenderRef = useRef<{
     snapshot: ScanAlignmentSnapshot;
     sourceSinceMs: number;
@@ -914,25 +1003,44 @@ export function useScanAlignmentAnalysis(
       return;
     }
     arucoEngineRef.current = "loading";
-    setSnapshot((s) => ({ ...s, arucoEngine: "loading" }));
+    setSnapshot((s) => ({ ...s, arucoEngine: "loading", arucoInitError: null }));
     let cancelled = false;
+    const hardTimeout = window.setTimeout(() => {
+      if (cancelled) return;
+      if (arucoEngineRef.current !== "ready") {
+        arucoEngineRef.current = "error";
+        const url = getArucoWasmUrl();
+        setSnapshot((s) => ({
+          ...s,
+          arucoEngine: "error",
+          arucoInitError:
+            `Timeout init ArUco (3s). ` +
+            (url ? `WASM URL: ${url}. ` : "") +
+            "Possibili cause: 404/MIME/CSP/Browser WebView.",
+        }));
+      }
+    }, 3000);
     void ensureArucoDetector()
       .then(() => {
         if (!cancelled) {
           arucoEngineRef.current = "ready";
           lastArucoMarkerSeenAtRef.current = performance.now();
-          setSnapshot((s) => ({ ...s, arucoEngine: "ready" }));
+          window.clearTimeout(hardTimeout);
+          setSnapshot((s) => ({ ...s, arucoEngine: "ready", arucoInitError: null }));
         }
       })
-      .catch(() => {
+      .catch((e: unknown) => {
         if (!cancelled) {
-          arucoEngineRef.current = "fallback";
+          arucoEngineRef.current = "error";
           lastArucoMarkerSeenAtRef.current = null;
-          setSnapshot((s) => ({ ...s, arucoEngine: "fallback" }));
+          const msg = e instanceof Error ? e.message : String(e);
+          window.clearTimeout(hardTimeout);
+          setSnapshot((s) => ({ ...s, arucoEngine: "error", arucoInitError: msg }));
         }
       });
     return () => {
       cancelled = true;
+      window.clearTimeout(hardTimeout);
     };
   }, [enabled]);
 
@@ -942,28 +1050,36 @@ export function useScanAlignmentAnalysis(
       // Robustness: never fully "fail" the UI state.
       // Keep last known snapshot and just decay confidence; this prevents flicker/blank overlays
       // on temporary camera/video readiness glitches.
-      setSnapshot((prev) => {
+      const nextSnap = (() => {
         const nextConf = Math.max(0, (prev.sourceConfidence ?? 0) * 0.92);
         return {
           ...prev,
           arucoEngine: arucoEngineRef.current,
+          analysisFps: analysisFpsRef.current.fps,
           sourceConfidence: nextConf,
           tracking: {
             ...prev.tracking,
             confidence: Math.max(0, prev.tracking.confidence * 0.92),
           },
         };
-      });
+      })();
+      liveRef.current = nextSnap;
+      const now = performance.now();
+      if (now - reactCommitLastAtRef.current > 350) {
+        reactCommitLastAtRef.current = now;
+        setSnapshot(nextSnap);
+      }
       return;
     }
 
-    const vw = video.videoWidth;
-    const vh = video.videoHeight;
-    const useAruco = isArucoDetectorReady() && arucoEngineRef.current === "ready";
-    const maxSide = useAruco ? 900 : 240;
-    const scale = Math.min(1, maxSide / Math.max(vw, vh));
-    const w = Math.max(32, Math.round(vw * scale));
-    const h = Math.max(32, Math.round(vh * scale));
+    const now = performance.now();
+    if (analysisBusyRef.current) return;
+    if (now < analysisSkipUntilRef.current) return;
+    analysisBusyRef.current = true;
+
+    // Fixed downscale: 640x480 analysis canvas for speed.
+    const w = 640;
+    const h = 480;
 
     if (
       cornerFlowContinuityRef.current &&
@@ -979,28 +1095,92 @@ export function useScanAlignmentAnalysis(
       canvas.height = h;
     }
     const ctx = canvas.getContext("2d", { willReadFrequently: true });
-    if (!ctx) return;
+    if (!ctx) {
+      analysisBusyRef.current = false;
+      return;
+    }
 
-    ctx.drawImage(video, 0, 0, w, h);
+    // Draw the frame into analysis canvas (no heavy filters here).
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    drawCover(ctx, video, w, h);
     let imageData: ImageData;
     try {
       imageData = ctx.getImageData(0, 0, w, h);
     } catch {
+      analysisBusyRef.current = false;
       return;
     }
-
-    const now = performance.now();
-    // Immediate fallback: se ArUco è 'ready' ma non vediamo marker per 500ms, passiamo a A4 contours.
-    if (arucoEngineRef.current === "ready") {
-      if (lastArucoMarkerSeenAtRef.current == null) {
-        lastArucoMarkerSeenAtRef.current = now;
+    // Build BW/threshold buffer without extra getImageData.
+    if (!analysisBwRef.current || analysisBwRef.current.width !== w || analysisBwRef.current.height !== h) {
+      analysisBwRef.current = new ImageData(new Uint8ClampedArray(w * h * 4), w, h);
+    }
+    if (!analysisBwInvRef.current || analysisBwInvRef.current.width !== w || analysisBwInvRef.current.height !== h) {
+      analysisBwInvRef.current = new ImageData(new Uint8ClampedArray(w * h * 4), w, h);
+    }
+    const bw = analysisBwRef.current;
+    const bwInv = analysisBwInvRef.current;
+    {
+      const src = imageData.data;
+      const dst = bw.data;
+      const dstInv = bwInv.data;
+      let sum = 0;
+      const n = (src.length / 4) | 0;
+      for (let i = 0; i < src.length; i += 4) {
+        sum += 0.299 * src[i] + 0.587 * src[i + 1] + 0.114 * src[i + 2];
       }
-      if (now - lastArucoMarkerSeenAtRef.current >= ARUCO_NO_MARKERS_FALLBACK_MS) {
-        arucoEngineRef.current = "fallback";
-        setSnapshot((s) => ({ ...s, arucoEngine: "fallback" }));
+      const mean = n > 0 ? sum / n : 128;
+      const thr = Math.max(40, Math.min(220, mean * 0.92));
+      for (let i = 0; i < src.length; i += 4) {
+        const y = 0.299 * src[i] + 0.587 * src[i + 1] + 0.114 * src[i + 2];
+        const v = y >= thr ? 255 : 0;
+        dst[i] = v;
+        dst[i + 1] = v;
+        dst[i + 2] = v;
+        dst[i + 3] = 255;
+        const inv = 255 - v;
+        dstInv[i] = inv;
+        dstInv[i + 1] = inv;
+        dstInv[i + 2] = inv;
+        dstInv[i + 3] = 255;
       }
     }
+    {
+      const dt = analysisFpsRef.current.lastAtMs > 0 ? now - analysisFpsRef.current.lastAtMs : 0;
+      analysisFpsRef.current.lastAtMs = now;
+      analysisFpsRef.current.fps = dt > 0 ? Math.max(0, Math.min(999, 1000 / dt)) : 0;
+    }
     const engine = arucoEngineRef.current;
+    if (engine === "error") {
+      // Hard stop: ArUco engine unavailable. No silent fallbacks.
+      const nextSnap: ScanAlignmentSnapshot = {
+        ...liveRef.current,
+        arucoEngine: "error",
+        analysisFps: analysisFpsRef.current.fps,
+        analysisPreviewCanvas: liveRef.current.analysisPreviewCanvas,
+        arucoDetectMs: arucoDetectMsRef.current,
+        arucoDetectError: arucoDetectErrRef.current,
+        markerCount: 0,
+        markerIdsDetected: [],
+        markersDetected: false,
+        markerCentersNorm: null,
+        arucoMarkerQuadsNorm: [],
+        arucoSlotCentersNorm: EMPTY_ARUCO_SLOTS,
+        tracking: { ...DEFAULT_TRACKING, confidence: 0 },
+        sourceConfidence: 0,
+        alignmentSource: "foot_fallback",
+        guide: "default",
+        isPositionCorrect: false,
+        a4GeometryOk: false,
+      };
+      liveRef.current = nextSnap;
+      const now = performance.now();
+      if (now - reactCommitLastAtRef.current > 350) {
+        reactCommitLastAtRef.current = now;
+        setSnapshot(nextSnap);
+      }
+      analysisBusyRef.current = false;
+      return;
+    }
     let next: ScanAlignmentSnapshot;
     let markerCentersNorm: { x: number; y: number }[] | null = null;
     let markerCount = 0;
@@ -1023,14 +1203,46 @@ export function useScanAlignmentAnalysis(
     } else {
 
       if (engine === "ready" && isArucoDetectorReady()) {
-        const markers = detectArucoOnImageData(imageData);
+        let markers: ArucoMarkerDetection[] = [];
+        let dict: string | null = null;
+        const t0 = performance.now();
+        try {
+          // Brute force dictionary loop: BW then BW-inverted, then raw RGBA control.
+          const a = detectArucoOnImageDataFastBruteforce(bw, ALL_DICTIONARIES);
+          if (a?.detections?.length) {
+            markers = a.detections;
+            dict = a.dictionary;
+          } else {
+            const b = detectArucoOnImageDataFastBruteforce(bwInv, ALL_DICTIONARIES);
+            if (b?.detections?.length) {
+              markers = b.detections;
+              dict = b.dictionary;
+            } else {
+              const c = detectArucoOnImageDataFastBruteforce(imageData, ALL_DICTIONARIES);
+              if (c?.detections?.length) {
+                markers = c.detections;
+                dict = c.dictionary;
+              } else {
+                markers = [];
+                dict = null;
+              }
+            }
+          }
+          arucoDetectErrRef.current = null;
+        } catch (e) {
+          arucoDetectErrRef.current = e instanceof Error ? e.message : String(e);
+          markers = [];
+          dict = null;
+        } finally {
+          arucoDetectMsRef.current = performance.now() - t0;
+        }
+        arucoDictRef.current = dict;
         markerCount = markers.length;
         if (markerCount > 0) {
           lastArucoMarkerSeenAtRef.current = now;
         }
-        markerIdsDetected = markers
-          .map((m) => m.id)
-          .filter((id, idx, arr) => id >= 0 && id <= 3 && arr.indexOf(id) === idx);
+        const idsRaw = markers.map((m) => m.id).filter((id, idx, arr) => arr.indexOf(id) === idx);
+        markerIdsDetected = idsRaw.filter((id) => id >= 0 && id <= 3);
         next = combineArucoAndHeuristic(imageData, markers, "ready");
         const picked = pickCornerMarkers(markers, w, h);
         if (picked.length >= 1) {
@@ -1633,30 +1845,70 @@ export function useScanAlignmentAnalysis(
       setStableAlignedMs(0);
     }
 
-    setSnapshot((prev) => {
-      if (
-        prev.guide === next.guide &&
-        prev.markersDetected === next.markersDetected &&
-        prev.footInFrame === next.footInFrame &&
-        prev.isPositionCorrect === next.isPositionCorrect &&
-        prev.arucoEngine === next.arucoEngine &&
-        prev.markerCount === next.markerCount &&
-        prev.markerIdsDetected.join(",") === next.markerIdsDetected.join(",") &&
-        prev.alignmentSource === next.alignmentSource &&
-        JSON.stringify(prev.footBBoxNorm) === JSON.stringify(next.footBBoxNorm) &&
-        JSON.stringify(prev.footCentroidNorm) === JSON.stringify(next.footCentroidNorm) &&
-        JSON.stringify(prev.footViewZoneMetrics) === JSON.stringify(next.footViewZoneMetrics) &&
-        prev.detectedFootViewZone === next.detectedFootViewZone &&
-        serializeMarkerCenters(prev.markerCentersNorm) === serializeMarkerCenters(next.markerCentersNorm) &&
-        serializeTracking(prev.tracking) === serializeTracking(next.tracking) &&
-        Math.abs((prev.sourceConfidence ?? 0) - (next.sourceConfidence ?? 0)) < 0.002 &&
-        prev.markerSharpnessMin === next.markerSharpnessMin &&
-        prev.a4GeometryOk === next.a4GeometryOk
-      ) {
-        return prev;
+    next = { ...next, analysisFps: analysisFpsRef.current.fps };
+    next = {
+      ...next,
+      arucoDetectMs: arucoDetectMsRef.current,
+      arucoDetectError: arucoDetectErrRef.current,
+      arucoDictionary: arucoDictRef.current,
+      arucoIdsRaw: (() => {
+        // expose ALL ids (even out of 0..3) so we can diagnose wrong dictionary.
+        const ids = (markers?.map((m) => m.id) ?? []).filter((id, idx, arr) => arr.indexOf(id) === idx);
+        return ids.slice(0, 12);
+      })(),
+    };
+    // Mini debug view: paint BW into a small offscreen canvas (no toDataURL).
+    if (now - analysisPreviewLastAtRef.current > 250) {
+      analysisPreviewLastAtRef.current = now;
+      try {
+        if (!analysisPreviewCanvasRef.current) analysisPreviewCanvasRef.current = document.createElement("canvas");
+        const pc = analysisPreviewCanvasRef.current;
+        const pw = 160;
+        const ph = 120;
+        if (pc.width !== pw || pc.height !== ph) {
+          pc.width = pw;
+          pc.height = ph;
+        }
+        const pctx = pc.getContext("2d");
+        if (pctx) {
+          // putImageData at source res, then scale down in the same canvas
+          // via an intermediate offscreen canvas that is reused (analysis canvas).
+          // We reuse `canvasRef.current` already at 640x480 as source.
+          // Draw BW to analysis canvas, then scale to preview.
+          ctx.putImageData(bw, 0, 0);
+          pctx.clearRect(0, 0, pw, ph);
+          pctx.imageSmoothingEnabled = false;
+          pctx.drawImage(canvas, 0, 0, pw, ph);
+          next = { ...next, analysisPreviewCanvas: pc };
+        }
+      } catch {
+        // ignore preview errors
       }
-      return next;
-    });
+    } else {
+      // keep last preview canvas reference stable
+      next = { ...next, analysisPreviewCanvas: analysisPreviewCanvasRef.current };
+    }
+
+    liveRef.current = next;
+    // Throttle React commits to avoid re-rendering every analysis tick.
+    const commitNow =
+      next.arucoEngine !== snapshot.arucoEngine ||
+      next.markerCount !== snapshot.markerCount ||
+      (next.markerCount > 0 && snapshot.markerCount === 0) ||
+      performance.now() - reactCommitLastAtRef.current > 350;
+    if (commitNow) {
+      reactCommitLastAtRef.current = performance.now();
+      setSnapshot(next);
+    }
+    const dur = performance.now() - now;
+    // If WASM detection is slow, skip frames aggressively to keep UI responsive.
+    const arucoMs = arucoDetectMsRef.current;
+    if (arucoMs > 30) {
+      analysisSkipUntilRef.current = performance.now() + Math.min(450, arucoMs * 2);
+    } else if (dur > 70) {
+      analysisSkipUntilRef.current = performance.now() + Math.min(240, dur);
+    }
+    analysisBusyRef.current = false;
   }, [videoRef, scanFootId]);
 
   useEffect(() => {
@@ -1715,7 +1967,7 @@ export function useScanAlignmentAnalysis(
 
     const loop = (t: number) => {
       raf = requestAnimationFrame(loop);
-      const interval = arucoEngineRef.current === "ready" ? 120 : 140;
+    const interval = arucoEngineRef.current === "ready" ? 50 : 80;
       if (t - last < interval) return;
       last = t;
       tick();
@@ -1725,5 +1977,5 @@ export function useScanAlignmentAnalysis(
     return () => cancelAnimationFrame(raf);
   }, [enabled, tick]);
 
-  return { ...snapshot, stableAlignedMs };
+  return { ...snapshot, stableAlignedMs, liveRef };
 }

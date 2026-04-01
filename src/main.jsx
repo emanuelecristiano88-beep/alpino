@@ -17,6 +17,8 @@ const PreparaScansionePage = lazy(() => import('./pages/PreparaScansionePage'))
 const GuidaScansionePiedePage = lazy(() => import('./pages/GuidaScansionePiedePage'))
 const BussolaPiedePage = lazy(() => import('./pages/BussolaPiedePage'))
 const SuMisuraPage = lazy(() => import('./pages/SuMisuraPage'))
+const ScanResults3D = lazy(() => import('./pages/ScanResults3D'))
+const DesignPlantarePage = lazy(() => import('./pages/DesignPlantarePage'))
 const ScannerOperatore = lazy(() => import('./components/ScannerOperatore'))
 const TestCameraPage = lazy(() => import('./pages/TestCameraPage'))
 
@@ -33,7 +35,7 @@ function Loader() {
  * Standalone scanner route.
  * - Owns the close button (X) that navigates back.
  * - Listens for `neuma:scan-proceed` (dispatched by ScannerCattura when scan is done)
- *   and redirects to /su-misura.
+ *   and redirects to /scan-results.
  * - Blocks landscape on touch devices with a gentle overlay (not a hard lock).
  */
 function ScannerRoute() {
@@ -43,9 +45,9 @@ function ScannerRoute() {
     const handler = (e) => {
       const detail = e.detail
       if (detail?.scanId) {
-        navigate('/su-misura', { state: { scanId: detail.scanId } })
+        navigate('/scan-results', { state: { scanId: detail.scanId } })
       } else {
-        navigate('/su-misura')
+        navigate('/scan-results')
       }
     }
     window.addEventListener('neuma:scan-proceed', handler)
@@ -99,6 +101,8 @@ createRoot(document.getElementById('root')).render(
           <Route path="/guida-scansione" element={<GuidaScansionePiedePage />} />
           <Route path="/bussola-del-piede" element={<BussolaPiedePage />} />
           <Route path="/su-misura" element={<SuMisuraPage />} />
+          <Route path="/scan-results" element={<ScanResults3D />} />
+          <Route path="/design-plantare" element={<DesignPlantarePage />} />
           <Route path="/scanner-operatore" element={<ScannerOperatore />} />
           <Route path="/admin/theme" element={<AdminThemePanel />} />
           <Route path="*" element={<AppShell />} />

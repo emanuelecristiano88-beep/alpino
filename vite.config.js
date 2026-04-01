@@ -131,9 +131,32 @@ function apiDevRoutesPlugin() {
   }
 }
 
+/**
+ * Some Android browsers are picky about WASM MIME types in dev.
+ * Force correct headers for *.wasm, especially /lib/opencv.wasm.
+ */
+function wasmMimePlugin() {
+  return {
+    name: 'wasm-mime',
+    configureServer(server) {
+      server.middlewares.use((req, res, next) => {
+        const url = (req.url || '').split('?')[0] || ''
+        if (url.endsWith('.wasm')) {
+          try {
+            res.setHeader('Content-Type', 'application/wasm')
+            // Dev-only: avoid stale cache on device while iterating
+            res.setHeader('Cache-Control', 'no-store')
+          } catch {}
+        }
+        next()
+      })
+    },
+  }
+}
+
 // https://vite.dev/config/
 export default defineConfig({
-  plugins: [react(), ...(useDevHttps ? [basicSsl()] : []), apiDevRoutesPlugin()],
+  plugins: [react(), ...(useDevHttps ? [basicSsl()] : []), wasmMimePlugin(), apiDevRoutesPlugin()],
   /** WASM + import.meta.url nel pacchetto ArUco: evita pre-bundle che rompe il .wasm */
   optimizeDeps: {
     exclude: ['@ar-js-org/aruco-rs'],

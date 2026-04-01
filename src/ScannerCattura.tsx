@@ -7,15 +7,17 @@ import { Button } from "./components/ui/button";
 import { cn } from "./lib/utils";
 import { PAIR_STORAGE_KEY, SCAN_METRICS_STORAGE_KEY } from "./constants/scan";
 import { useScanAlignmentAnalysis } from "./hooks/useScanAlignmentAnalysis";
+import { useOpenCvArucoAnalysis } from "./hooks/useOpenCvArucoAnalysis";
 import { requestOrientationAccess } from "./hooks/useDeviceTilt";
 import { useScanFrameOrientation } from "./hooks/useScanFrameOrientation";
 import { useScanGuidance } from "./hooks/useScanGuidance";
 import ScannerAlignmentOverlay from "./components/scanner/ScannerAlignmentOverlay";
 import ScanDebugOverlay from "./components/scanner/ScanDebugOverlay";
 import ArucoMarkerPins from "./components/scanner/ArucoMarkerPins";
+import ArucoMarkerBracketsCanvas from "./components/scanner/ArucoMarkerBracketsCanvas";
 import ScannerSheetOverlayCanvas from "./components/scanner/ScannerSheetOverlayCanvas";
 import { computeNeumaBiometryFromImageData, type NeumaBiometryResult } from "./lib/biometry";
-import { ensureArucoDetector, detectArucoOnImageDataMultiDictionary } from "./lib/aruco/arucoWasm";
+import { loadOpenCv, isOpenCvReady } from "./lib/opencv/loadOpenCv";
 import { pickCornerMarkers, type ArucoMarkerDetection, type ArucoMarkerPoint } from "./lib/aruco/a4MarkerGeometry";
 import { markerSharpnessScore } from "./lib/scanner/frameQuality";
 // Types only — no runtime Three.js dependency.
@@ -32,6 +34,7 @@ import { sheetQuadCornersNormFromMarkerQuads } from "./lib/scanner/sheetQuadFrom
 import { estimateFootBBoxOverlapFractionOnPolygon } from "./lib/scanner/footOnSheetOverlap";
 import { discardCameraStreamHandoff, takeCameraStreamHandoff } from "./lib/cameraStreamHandoff";
 import { createNewScan, uploadVideoChunk as supabaseUploadChunk, uploadFullScan, updateScan } from "./lib/scanService";
+import { normalizedVideoToContainerPercent } from "./lib/scanner/videoOverlayCoords";
 import type { FootId, Metrics } from "./types/scan";
 
 // Lazy-load 3D stack (R3F/three) to avoid crashing the live camera path on Android.
@@ -252,6 +255,15 @@ const MAX_UPLOAD_FILE_BYTES = 200 * 1024; // target < 200KB
 const DEFAULT_METRICS: Metrics = { footLengthMm: 265, forefootWidthMm: 95 };
 /** UX beginner: niente fasi/numeri/overlay tecnici, solo due righe chiare. */
 const SIMPLE_BEGINNER_SCAN_UI = true;
+/** Missione NEUMA Zero-Touch: nessun bottone visibile. */
+const ZERO_TOUCH_SCANNER = true;
+/** Lock UI orientation to avoid layout jitter on rotation. */
+const SCANNER_ORIENTATION_LOCK: "portrait" | "landscape" = "portrait";
+/** Starlink-like dot-cloud capture: quick, light videos. */
+const STARLINK_DOT_CLOUD_MODE = true;
+const DOT_CLOUD_COUNT = 40;
+const DOME_RADIUS_CM = 25;
+const DOME_HEIGHT_CM = 20;
 
 const clamp = (n: number, min: number, max: number) => Math.max(min, Math.min(max, n));
 
@@ -432,12 +444,10 @@ function markerMeanEdgePx(marker: ArucoMarkerDetection): number {
 
 async function validateArucoOnPhoto(blob: Blob) {
   const imageData = await blobToImageData(blob);
-  await ensureArucoDetector();
-  const detected = await detectArucoOnImageDataMultiDictionary(imageData);
-  if (!detected || detected.detections.length === 0) {
-    return { ok: false as const, reason: "marker_not_found" as const };
-  }
-  const picked = pickCornerMarkers(detected.detections, imageData.width, imageData.height);
+  // OpenCV.js path: photo-level ArUco validation disabled in Starlink mode.
+  // Keeping this function for legacy pipeline, but without aruco-rs dependency.
+  return { ok: false as const, reason: "marker_not_found" as const };
+  const picked = pickCornerMarkers([], imageData.width, imageData.height);
   if (!picked.length) return { ok: false as const, reason: "marker_not_found" as const };
   const best = [...picked].sort((a, b) => markerMeanEdgePx(b) - markerMeanEdgePx(a))[0];
   if (!best || best.corners.length < 4) return { ok: false as const, reason: "marker_not_found" as const };
@@ -477,7 +487,7 @@ async function validateArucoOnPhoto(blob: Blob) {
   }
   return {
     ok: true as const,
-    dictionary: detected.dictionary,
+    dictionary: "DICT_4X4_50",
     hasFullAruco,
     corners: best.corners.slice(0, 4),
     sharpness,
@@ -518,28 +528,9 @@ function ProcessingView({
           {Math.floor(progress)}%
         </div>
 
-        {scanId && isReady ? (
-          <div className="mt-6 flex flex-col gap-3">
-            <Button
-              type="button"
-              variant="default"
-              onClick={onVisualize}
-              className="h-auto w-full rounded-xl px-6 py-4 font-mono text-lg tracking-[0.14em]"
-            >
-              VISUALIZZA 3D
-            </Button>
-            <Button
-              type="button"
-              variant="outline"
-              onClick={onBackToGallery}
-              className="h-auto w-full rounded-xl border-zinc-800 bg-zinc-900/50 px-6 py-3 font-mono text-sm tracking-[0.12em] text-zinc-100 backdrop-blur-md hover:bg-zinc-800 hover:text-zinc-100"
-            >
-              TORNA ALLA GALLERY
-            </Button>
-          </div>
-        ) : (
-          <div className="mt-5 text-sm text-zinc-400">{statusText || "Questo può richiedere alcuni secondi."}</div>
-        )}
+        <div className="mt-5 text-sm text-zinc-400">
+          {statusText || (scanId && isReady ? "Pronto." : "Questo può richiedere alcuni secondi.")}
+        </div>
       </div>
     </div>
   );
@@ -551,6 +542,13 @@ export default function ScannerCattura() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const videoContainerRef = useRef<HTMLDivElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const [gyroAlivePing, setGyroAlivePing] = useState(false);
+  const gyroAliveRef = useRef(false);
+  const [sensorsUnlocked, setSensorsUnlocked] = useState(false);
+  const [sensorsPromptVisible, setSensorsPromptVisible] = useState(false);
+  const [scanStarted, setScanStarted] = useState(false);
+  const [dotCloudSuccessFlash, setDotCloudSuccessFlash] = useState(false);
+  const [arucoFallbackArcDeg] = useState(0);
 
   const [cameraState, setCameraState] = useState<
     | "idle"
@@ -563,6 +561,306 @@ export default function ScannerCattura() {
     | "error"
   >("idle");
   const [hasLivePreview, setHasLivePreview] = useState(false);
+  const [arcDisplayDeg, setArcDisplayDeg] = useState(0);
+  const arcTargetDegRef = useRef(0);
+  const hapticStepRef = useRef(-1);
+  const [dotCloudProgressPct, setDotCloudProgressPct] = useState(0);
+  const dotCloudProgressRef = useRef(0);
+  const dotCloudHudPctRef = useRef<HTMLSpanElement | null>(null);
+  const debugFpsElRef = useRef<HTMLSpanElement | null>(null);
+  const debugMarkersElRef = useRef<HTMLSpanElement | null>(null);
+  const debugWasmElRef = useRef<HTMLSpanElement | null>(null);
+  const debugDetectElRef = useRef<HTMLSpanElement | null>(null);
+  const debugErrElRef = useRef<HTMLDivElement | null>(null);
+  const debugCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const dotCloudRef = useRef<{ id: number; yaw: number; pitch: number; consumed: boolean; pop: number }[]>([]);
+  const dotCloudCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const dotCloudConsumedRef = useRef(0);
+  const dotCloudStartedRef = useRef(false);
+  const dotCloudDoneRef = useRef(false);
+  const lastArucoSeenAtRef = useRef(0);
+  const domeFadeStartAtRef = useRef(0);
+  const domeOpacityRef = useRef(0);
+  const domeCenterSmoothedRef = useRef<{ x: number; y: number; scale: number } | null>(null);
+  const [bootError, setBootError] = useState<string | null>(null);
+  const [booting, setBooting] = useState(false);
+  const [portraitOk, setPortraitOk] = useState(true);
+  const [hudSizePx, setHudSizePx] = useState(150);
+  const [openCvStatus, setOpenCvStatus] = useState<"loading" | "ready" | "error">("loading");
+  const [openCvError, setOpenCvError] = useState<string | null>(null);
+  const [showForceRefresh, setShowForceRefresh] = useState(false);
+  const openCvBootStartedAtRef = useRef<number>(0);
+  const [openCvFetchDiag, setOpenCvFetchDiag] = useState<string | null>(null);
+  const openCvWasmBinaryRef = useRef<Uint8Array | null>(null);
+  const openCvWasmObjectUrlRef = useRef<string | null>(null);
+
+  // Freeze layout to full viewport.
+  useEffect(() => {
+    const update = () => {
+      const w = window.innerWidth || 0;
+      const h = window.innerHeight || 0;
+      setPortraitOk(h >= w);
+      const base = Math.min(w, h);
+      setHudSizePx(Math.round(Math.max(120, Math.min(190, base * 0.34))));
+    };
+    update();
+    window.addEventListener("resize", update);
+    window.addEventListener("orientationchange", update);
+    return () => {
+      window.removeEventListener("resize", update);
+      window.removeEventListener("orientationchange", update);
+    };
+  }, []);
+
+  // Load OpenCV.js (with ArUco) early; block scanner start until ready.
+  useEffect(() => {
+    let cancelled = false;
+    if (isOpenCvReady()) {
+      setOpenCvStatus("ready");
+      setOpenCvError(null);
+      setOpenCvFetchDiag(null);
+      return;
+    }
+    setOpenCvStatus("loading");
+    setOpenCvError(null);
+    setOpenCvFetchDiag(null);
+    setShowForceRefresh(false);
+    openCvBootStartedAtRef.current = performance.now();
+
+    const preloadAndLoad = async () => {
+      // Manual preload (Emscripten assertion fix): fetch WASM ourselves and inject into Module.wasmBinary.
+      const tryUrls = ["/lib/opencv.wasm", "/lib/opencv_js.wasm"];
+      let lastErr: string | null = null;
+      for (const u of tryUrls) {
+        try {
+          const res = await fetch(u, { cache: "no-store" });
+          if (!res.ok) throw new Error(`fetch ${res.status}`);
+          const ct = (res.headers.get("content-type") || "").toLowerCase();
+          if (ct.includes("text/html")) {
+            throw new Error(`content-type=${ct || "-"} (server returned HTML, not wasm)`);
+          }
+          if (!(ct.includes("application/wasm") || ct.includes("application/octet-stream") || ct.includes("binary/octet-stream"))) {
+            // Non blocchiamo su alcuni CDN/proxy strani, ma lo segnaliamo in debug.
+            setOpenCvFetchDiag((p) => (p ? `${p}\nWASM warning: ${u} content-type=${ct || "-"}` : `WASM warning: ${u} content-type=${ct || "-"}`));
+          }
+
+          // Use Blob → object URL for locateFile (MIME/path bypass), and also keep wasmBinary bytes as fallback.
+          const blob = await res.blob();
+          try {
+            if (openCvWasmObjectUrlRef.current) URL.revokeObjectURL(openCvWasmObjectUrlRef.current);
+          } catch {}
+          openCvWasmObjectUrlRef.current = URL.createObjectURL(blob);
+
+          const buf = await blob.arrayBuffer();
+          const bytes = new Uint8Array(buf);
+          openCvWasmBinaryRef.current = bytes;
+          const prev = (window as any).Module;
+          (window as any).Module = {
+            ...(typeof prev === "object" && prev ? prev : {}),
+            wasmBinary: bytes,
+          };
+          lastErr = null;
+          break;
+        } catch (e) {
+          lastErr = `${u}: ${e instanceof Error ? e.message : String(e)}`;
+        }
+      }
+
+      // Always define Emscripten hooks BEFORE loading opencv.js.
+      try {
+        const prev = (window as any).Module;
+        const wasmUrl = openCvWasmObjectUrlRef.current;
+        (window as any).Module = {
+          ...(typeof prev === "object" && prev ? prev : {}),
+          locateFile: (path: string) => {
+            // If we have a blob URL, prefer it for any wasm filename.
+            if (wasmUrl && (path.endsWith(".wasm") || path.includes("opencv"))) return wasmUrl;
+            return `/lib/${path}`;
+          },
+          onRuntimeInitialized: () => {
+            console.log("OpenCV con WASM precaricato: READY!");
+          },
+        };
+      } catch {}
+
+      if (lastErr) {
+        // Non blocchiamo: alcuni build riescono comunque via locateFile.
+        setOpenCvFetchDiag((p) => (p ? `${p}\nWASM preload failed: ${lastErr}` : `WASM preload failed: ${lastErr}`));
+      }
+
+      await loadOpenCv({ timeoutMs: 20_000 });
+    };
+
+    preloadAndLoad()
+      .then(() => {
+        if (cancelled) return;
+        // Verify aruco contrib module exists.
+        const cv = (window as any).cv;
+        if (cv?.aruco) {
+          if (!cv?.aruco?.getPredefinedDictionary || !cv?.aruco?.detectMarkers) {
+            setOpenCvStatus("error");
+            setOpenCvError("Build OpenCV incompleto: cv.aruco presente ma API ArUco non esposta.");
+            // eslint-disable-next-line no-alert
+            alert("Build OpenCV incompleto, manca ArUco");
+            return;
+          }
+          setOpenCvStatus("ready");
+          setOpenCvError(null);
+          return;
+        } else {
+          setOpenCvStatus("error");
+          setOpenCvError("OPENCV_READY_NO_ARUCO: modulo ArUco assente in questo build.");
+          return;
+        }
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        setOpenCvStatus("error");
+        setOpenCvError(e instanceof Error ? e.message : String(e));
+      });
+    return () => {
+      cancelled = true;
+      // Cleanup: release the large wasmBinary buffer reference.
+      try {
+        const mod = (window as any).Module;
+        if (mod && typeof mod === "object") {
+          delete mod.wasmBinary;
+        }
+      } catch {}
+      openCvWasmBinaryRef.current = null;
+      try {
+        if (openCvWasmObjectUrlRef.current) URL.revokeObjectURL(openCvWasmObjectUrlRef.current);
+      } catch {}
+      openCvWasmObjectUrlRef.current = null;
+    };
+  }, []);
+
+  // When OpenCV fails (cv not present / not initialized), run a brute URL check
+  // and capture global script/wasm errors to show on-screen (no console needed).
+  useEffect(() => {
+    if (openCvStatus !== "error") return;
+    let cancelled = false;
+
+    const onErr = (ev: Event) => {
+      if (cancelled) return;
+      try {
+        const e = ev as ErrorEvent;
+        const msg = e?.message || "script error";
+        const src = e?.filename ? ` @ ${e.filename}:${e.lineno ?? 0}` : "";
+        setOpenCvFetchDiag((prev) => (prev ? `${prev}\nJS error: ${msg}${src}` : `JS error: ${msg}${src}`));
+      } catch {}
+    };
+    const onRej = (ev: PromiseRejectionEvent) => {
+      if (cancelled) return;
+      try {
+        const msg = ev?.reason instanceof Error ? ev.reason.message : String(ev?.reason ?? "unhandled rejection");
+        setOpenCvFetchDiag((prev) => (prev ? `${prev}\nPromise: ${msg}` : `Promise: ${msg}`));
+      } catch {}
+    };
+    window.addEventListener("error", onErr);
+    window.addEventListener("unhandledrejection", onRej);
+
+    const run = async () => {
+      try {
+        const base = window.location.origin;
+        const urls = [`${base}/lib/opencv.js`, `${base}/lib/opencv.wasm`, `${base}/lib/opencv_js.wasm`];
+        const results: string[] = [];
+        for (const u of urls) {
+          try {
+            const res = await fetch(u, { method: "GET", cache: "no-store" });
+            const ct = res.headers.get("content-type") || "-";
+            results.push(`${u} → ${res.status} (${ct})`);
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            results.push(`${u} → fetch error (${msg})`);
+          }
+        }
+        if (!cancelled) setOpenCvFetchDiag(results.join("\n"));
+      } catch {}
+    };
+    run();
+
+    return () => {
+      cancelled = true;
+      window.removeEventListener("error", onErr);
+      window.removeEventListener("unhandledrejection", onRej);
+    };
+  }, [openCvStatus]);
+
+  // Hard polling (plan B): if `cv` exists but runtime isn't initialized yet,
+  // keep checking `cv.Mat` directly every 500ms.
+  useEffect(() => {
+    if (openCvStatus === "ready" || openCvStatus === "error") return;
+    let cancelled = false;
+    const tick = () => {
+      if (cancelled) return;
+      try {
+        if (isOpenCvReady()) {
+          const cv = (window as any).cv;
+          if (cv?.aruco && cv?.aruco?.detectMarkers && cv?.aruco?.getPredefinedDictionary) {
+            setOpenCvStatus("ready");
+            setOpenCvError(null);
+            setShowForceRefresh(false);
+            return;
+          }
+          setOpenCvStatus("error");
+          setOpenCvError("OPENCV_READY_NO_ARUCO: modulo ArUco assente o API non esposte in questo build.");
+          return;
+        }
+      } catch {
+        // ignore and keep polling
+      }
+
+      const startedAt = openCvBootStartedAtRef.current || 0;
+      if (startedAt > 0 && performance.now() - startedAt > 10_000) {
+        setShowForceRefresh(true);
+      }
+    };
+    tick();
+    const id = window.setInterval(tick, 500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [openCvStatus]);
+
+  const forceHardRefresh = useCallback(async () => {
+    try {
+      if ("caches" in window) {
+        const keys = await caches.keys();
+        await Promise.all(keys.map((k) => caches.delete(k)));
+      }
+    } catch {}
+    try {
+      if ("serviceWorker" in navigator) {
+        const regs = await navigator.serviceWorker.getRegistrations();
+        await Promise.all(regs.map((r) => r.unregister()));
+      }
+    } catch {}
+    try {
+      window.location.reload();
+    } catch {}
+  }, []);
+
+  useEffect(() => {
+    // Freeze page layout and prevent scroll jitter on rotation.
+    const root = document.documentElement;
+    const body = document.body;
+    const prevRootOverflow = root.style.overflow;
+    const prevBodyOverflow = body.style.overflow;
+    const prevBodyOverscroll = body.style.overscrollBehavior;
+    const prevBodyTouch = body.style.touchAction;
+    root.style.overflow = "hidden";
+    body.style.overflow = "hidden";
+    body.style.overscrollBehavior = "none";
+    body.style.touchAction = "none";
+    return () => {
+      root.style.overflow = prevRootOverflow;
+      body.style.overflow = prevBodyOverflow;
+      body.style.overscrollBehavior = prevBodyOverscroll;
+      body.style.touchAction = prevBodyTouch;
+    };
+  }, []);
 
   // Debug: confirm video element is present in DOM after mount.
   useEffect(() => {
@@ -573,71 +871,10 @@ export default function ScannerCattura() {
     }
   }, []);
 
-  // Camera start: fire IMMEDIATELY on mount (same as TestCameraPage).
-  // No state-gate — eliminates all React lifecycle timing issues on Android.
+  // Camera start: request on user gesture for universal compatibility (iOS requires it).
   const cameraStartedRef = useRef(false);
   useEffect(() => {
-    let cancelled = false;
-    let activeStream: MediaStream | null = null;
-
-    const start = async () => {
-      if (cameraStartedRef.current) return;
-      cameraStartedRef.current = true;
-      console.log("CAMERA_INIT_START");
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: "environment" },
-          audio: false,
-        });
-        if (cancelled) {
-          stream.getTracks().forEach((t) => t.stop());
-          return;
-        }
-        activeStream = stream;
-        streamRef.current = stream;
-
-        // Use React ref (set via ref={videoRef} on the element) — never getElementById
-        // which can race with React re-renders on Android.
-        const videoEl = videoRef.current;
-        if (videoEl) {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          (videoEl as any).srcObject = stream;
-          // Fire-and-forget play(): autoPlay+muted handles playback automatically.
-          // Awaiting play() causes AbortError on Android Chrome when autoPlay is also set,
-          // which silently prevents the video from showing (black screen).
-          videoEl.play().catch((e) => {
-            console.warn("[ScannerCattura] play() soft-failed (autoPlay handles it):", e);
-          });
-          console.log("CAMERA_INIT_SUCCESS");
-          if (!cancelled) setHasLivePreview(true);
-        } else {
-          console.error("[ScannerCattura] videoRef.current is null — stream acquired but not attached");
-        }
-      } catch (e) {
-        console.error("[ScannerCattura] camera start failed:", e);
-        cameraStartedRef.current = false;
-      }
-    };
-
-    start();
-
-    return () => {
-      cancelled = true;
-      if (activeStream) {
-        activeStream.getTracks().forEach((t) => t.stop());
-      }
-      if (streamRef.current === activeStream) streamRef.current = null;
-      if (videoRef.current) {
-        try {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          (videoRef.current as any).srcObject = null;
-        } catch {
-          /* ignore */
-        }
-      }
-      setHasLivePreview(false);
-      cameraStartedRef.current = false;
-    };
+    return () => {};
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const restartCamera = useCallback(async () => {
@@ -647,11 +884,33 @@ export default function ScannerCattura() {
     }
     cameraStartedRef.current = false;
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: "environment" },
-        audio: false,
-      });
+      let stream: MediaStream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: "environment",
+            width: { exact: 1920 },
+            height: { exact: 1080 },
+          },
+          audio: false,
+        });
+      } catch {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: "environment", width: { ideal: 1920 }, height: { ideal: 1080 } },
+          audio: false,
+        });
+      }
       streamRef.current = stream;
+      try {
+        const track = stream.getVideoTracks?.()[0];
+        if ((track as unknown as { applyConstraints?: (c: unknown) => Promise<void> })?.applyConstraints) {
+          await (track as unknown as { applyConstraints: (c: unknown) => Promise<void> }).applyConstraints({
+            advanced: [{ focusMode: "continuous", exposureMode: "continuous" }],
+          });
+        }
+      } catch {
+        // ignore
+      }
       const videoEl = videoRef.current;
       if (videoEl) {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -667,6 +926,10 @@ export default function ScannerCattura() {
       console.error("[ScannerCattura] restartCamera failed:", e);
     }
   }, []);
+
+  // Camera re-sync refs (effect lives after `alignment` is created).
+  const noMarkersSinceRef = useRef<number | null>(null);
+  const lastResyncAtRef = useRef(0);
 
   const preferredVideoDeviceIdRef = useRef<string | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -684,6 +947,12 @@ export default function ScannerCattura() {
   const [stabilityPct, setStabilityPct] = useState(0);
   const stableTimerRef = useRef<number | null>(null);
   const stableStartRef = useRef<number>(0);
+
+  /** 0-210: degrees the user has rotated around the foot since recording started. */
+  const [gyroArcDeg, setGyroArcDeg] = useState(0);
+  const gyroAccRef = useRef(0);
+  const gyroLastAlphaRef = useRef<number | null>(null);
+  const ARC_TARGET_DEG = 210;
   const [showMotionBlurWarning, setShowMotionBlurWarning] = useState(false);
   const motionBlurScoreRef = useRef<number>(0);
   const blurCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -1010,9 +1279,120 @@ export default function ScannerCattura() {
   }, [pairComplete, photosLeft]);
 
   const scanOverlayEnabled = cameraState === "readyPhase";
-  /** Reset tracking ArUco solo al cambio piede, non tra fasi interne (esperienza continua). */
+  /** Keep legacy alignment shape for the rest of the scanner pipeline. Disabled in Starlink/OpenCV mode. */
   const alignmentResetKey = currentFoot === "RIGHT" ? 1 : 0;
-  const alignment = useScanAlignmentAnalysis(videoRef, scanOverlayEnabled, alignmentResetKey, currentFoot);
+  const alignment = useScanAlignmentAnalysis(videoRef, scanOverlayEnabled && !STARLINK_DOT_CLOUD_MODE, alignmentResetKey, currentFoot);
+  /** OpenCV-based ArUco for Starlink mode. */
+  const openCvAruco = useOpenCvArucoAnalysis(videoRef, scanOverlayEnabled && openCvStatus === "ready");
+
+  // Bypass React re-render: update debug HUD + draw marker boxes directly.
+  useEffect(() => {
+    if (cameraState !== "readyPhase") return;
+    let raf = 0;
+    let lastHudAt = 0;
+    // Cache DOM lookups once (explicit bypass requested).
+    const fpsEl = document.getElementById("debug-fps") as HTMLSpanElement | null;
+    const markersEl = document.getElementById("debug-markers") as HTMLSpanElement | null;
+    const wasmEl = document.getElementById("debug-wasm") as HTMLSpanElement | null;
+    const detectEl = document.getElementById("debug-detect") as HTMLSpanElement | null;
+    const errEl = document.getElementById("debug-err") as HTMLDivElement | null;
+
+    const draw = (t: number) => {
+      raf = requestAnimationFrame(draw);
+      const snap = STARLINK_DOT_CLOUD_MODE ? (openCvAruco.liveRef.current as any) : alignment.liveRef.current;
+      // HUD update ~5Hz (no React state)
+      if (t - lastHudAt > 180) {
+        lastHudAt = t;
+        if (fpsEl) fpsEl.innerText = String(Math.round(snap.analysisFps ?? 0));
+        if (markersEl) markersEl.innerText = String(snap.markerCount ?? 0);
+        if (wasmEl) wasmEl.innerText = String(snap.arucoEngine ?? "");
+        if (detectEl) detectEl.innerText = `${Math.round(snap.arucoDetectMs ?? 0)}ms`;
+        if (errEl) errEl.innerText = snap.arucoDetectError ?? "";
+        if (dotCloudHudPctRef.current) dotCloudHudPctRef.current.innerText = `${dotCloudProgressRef.current}%`;
+      }
+
+      // Marker boxes: draw directly on a single canvas overlay.
+      const c = debugCanvasRef.current;
+      const box = videoContainerRef.current;
+      const v = videoRef.current;
+      if (!c || !box || !v) return;
+      const rect = box.getBoundingClientRect();
+      if (rect.width < 2 || rect.height < 2 || !v.videoWidth || !v.videoHeight) return;
+      const dpr = Math.max(1, window.devicePixelRatio || 1);
+      const targetW = Math.round(rect.width * dpr);
+      const targetH = Math.round(rect.height * dpr);
+      if (c.width !== targetW || c.height !== targetH) {
+        c.width = targetW;
+        c.height = targetH;
+        c.style.width = `${rect.width}px`;
+        c.style.height = `${rect.height}px`;
+      }
+      const ctx = c.getContext("2d");
+      if (!ctx) return;
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.clearRect(0, 0, c.width, c.height);
+      ctx.scale(dpr, dpr);
+      const quads = (STARLINK_DOT_CLOUD_MODE ? snap.quadsNorm : snap.arucoMarkerQuadsNorm) ?? [];
+      if (!quads.length) return;
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = "rgba(57,255,20,0.95)";
+      ctx.shadowColor = "rgba(57,255,20,0.35)";
+      ctx.shadowBlur = 14;
+      for (const q of quads) {
+        const cs = (q.corners ?? []).slice(0, 4);
+        if (cs.length < 4) continue;
+        const pts = cs.map((p) => {
+          const pos = normalizedVideoToContainerPercent(p.x, p.y, v.videoWidth, v.videoHeight, rect.width, rect.height);
+          return { x: (pos.leftPct / 100) * rect.width, y: (pos.topPct / 100) * rect.height };
+        });
+        ctx.beginPath();
+        ctx.moveTo(pts[0].x, pts[0].y);
+        ctx.lineTo(pts[1].x, pts[1].y);
+        ctx.lineTo(pts[2].x, pts[2].y);
+        ctx.lineTo(pts[3].x, pts[3].y);
+        ctx.closePath();
+        ctx.stroke();
+      }
+    };
+    raf = requestAnimationFrame(draw);
+    return () => cancelAnimationFrame(raf);
+  }, [alignment.liveRef, cameraState]);
+
+  // Camera re-sync: if no markers are detected for 3s, try to kick autofocus/restart once.
+  useEffect(() => {
+    if (cameraState !== "readyPhase") {
+      noMarkersSinceRef.current = null;
+      return;
+    }
+    if (!scanStarted) {
+      noMarkersSinceRef.current = null;
+      return;
+    }
+    if ((alignment.markerCount ?? 0) > 0) {
+      noMarkersSinceRef.current = null;
+      return;
+    }
+    const now = performance.now();
+    if (noMarkersSinceRef.current == null) noMarkersSinceRef.current = now;
+    const elapsed = now - noMarkersSinceRef.current;
+    if (elapsed < 3000) return;
+    if (now - lastResyncAtRef.current < 7000) return;
+    lastResyncAtRef.current = now;
+    (async () => {
+      try {
+        const track = streamRef.current?.getVideoTracks?.()[0];
+        if ((track as unknown as { applyConstraints?: (c: unknown) => Promise<void> })?.applyConstraints) {
+          await (track as unknown as { applyConstraints: (c: unknown) => Promise<void> }).applyConstraints({
+            advanced: [{ focusMode: "continuous", exposureMode: "continuous" }],
+          });
+          return;
+        }
+      } catch {}
+      try {
+        await restartCamera();
+      } catch {}
+    })();
+  }, [alignment.markerCount, cameraState, restartCamera, scanStarted]);
   const frameTilt = useScanFrameOrientation(scanOverlayEnabled);
 
   /** Angolo istantaneo 0–360° (stesso mapping dei settori); null senza foglio o tilt debole. */
@@ -1064,6 +1444,51 @@ export default function ScannerCattura() {
     });
   }, []);
 
+  const recordingStopRequestedRef = useRef(false);
+  const recordingStartedAtRef = useRef<number>(0);
+
+  const unlockSensorsFromGesture = useCallback(async () => {
+    try {
+      await requestOrientationAccess();
+    } catch {
+      // ignore; some browsers resolve without permission and still emit events
+    }
+    setSensorsUnlocked(true);
+    setSensorsPromptVisible(false);
+  }, []);
+
+  const handleStartScan = useCallback(async () => {
+    // Must be called from a user gesture.
+    try {
+      const o = (window.screen as unknown as { orientation?: { lock?: (v: string) => Promise<void> } })?.orientation;
+      const lockFn = o?.lock;
+      if (typeof lockFn === "function") {
+        await lockFn.call(o, "portrait");
+      }
+    } catch {
+      // ignore
+    }
+
+    // iOS requires explicit permission calls.
+    try {
+      const DOE = DeviceOrientationEvent as unknown as { requestPermission?: () => Promise<"granted" | "denied"> };
+      if (typeof DOE?.requestPermission === "function") {
+        await DOE.requestPermission().catch(() => "denied");
+      }
+    } catch {}
+    try {
+      const DME = DeviceMotionEvent as unknown as { requestPermission?: () => Promise<"granted" | "denied"> };
+      if (typeof DME?.requestPermission === "function") {
+        await DME.requestPermission().catch(() => "denied");
+      }
+    } catch {}
+
+    await unlockSensorsFromGesture();
+    setScanStarted(true);
+  }, [unlockSensorsFromGesture]);
+
+  // stopAndUploadDotCloud is declared later (needs uploadFullScanVideo).
+
   /**
    * Assembles accumulated video chunks into a single Blob and uploads it to
    * Supabase Storage ("raw-scans/scan_<timestamp>.webm").
@@ -1094,10 +1519,16 @@ export default function ScannerCattura() {
         onProgress(97);
 
         // Update the scan row created at session start, or create a fresh one.
-        const existingId = supabaseScanIdRef.current;
-        if (existingId) {
-          await updateScan(existingId, { video_url: filename, status: "pending" });
+        let existingId = supabaseScanIdRef.current;
+        if (!existingId) {
+          try {
+            existingId = await createNewScan();
+            supabaseScanIdRef.current = existingId;
+          } catch (e) {
+            console.warn("[Supabase] createNewScan failed during upload (non-fatal):", e);
+          }
         }
+        if (existingId) await updateScan(existingId, { video_url: filename, status: "pending" });
 
         onProgress(100);
         console.log("[ScannerCattura] video uploaded:", filename);
@@ -1109,6 +1540,25 @@ export default function ScannerCattura() {
     },
     []
   );
+
+  const stopAndUploadDotCloud = useCallback(async () => {
+    if (dotCloudDoneRef.current) return;
+    dotCloudDoneRef.current = true;
+    setCameraState("uploading");
+    try {
+      await stopVideoRecording();
+    } catch {}
+    try {
+      await uploadFullScanVideo((p) => setVideoUploadProgress(p));
+    } catch {}
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(
+        new CustomEvent("neuma:scan-proceed", {
+          detail: { scanId: supabaseScanIdRef.current ?? undefined },
+        })
+      );
+    }
+  }, [stopVideoRecording, uploadFullScanVideo]);
 
   const startVideoRecording = useCallback(() => {
     if (typeof window === "undefined") return;
@@ -1139,8 +1589,8 @@ export default function ScannerCattura() {
 
     const rec = new MediaRecorder(stream, {
       mimeType: mimeType || undefined,
-      videoBitsPerSecond: 2_000_000,
-      audioBitsPerSecond: 64_000,
+      videoBitsPerSecond: 7_000_000, // 6–8 Mbps target: keep <15MB for ~10s
+      audioBitsPerSecond: 0,         // nessun audio (scansione)
     });
     mediaRecorderRef.current = rec;
     setIsVideoRecording(true);
@@ -1157,6 +1607,25 @@ export default function ScannerCattura() {
     rec.start(1200); // timeslice: chunk ~1.2s
   }, [uploadVideoChunk]);
 
+  // Starlink requirement: keep video recording running in background once scan starts
+  // (but only when at least ONE ArUco marker is visible).
+  useEffect(() => {
+    if (!STARLINK_DOT_CLOUD_MODE) return;
+    if (!scanStarted) return;
+    if (cameraState !== "readyPhase") return;
+    if (!sensorsUnlocked) return;
+    if ((alignment.markerCount ?? 0) < 1) return;
+    if (isVideoRecording) return;
+    startVideoRecording();
+  }, [
+    alignment.markerCount,
+    cameraState,
+    isVideoRecording,
+    scanStarted,
+    sensorsUnlocked,
+    startVideoRecording,
+  ]);
+
   // Stop recording when leaving readyPhase; starting is handled by the stability timer below.
   useEffect(() => {
     if (cameraState !== "readyPhase") {
@@ -1169,46 +1638,72 @@ export default function ScannerCattura() {
     }
   }, [cameraState, stopVideoRecording]);
 
-  // Auto-start: begin recording only after 2s of stable alignment (sheet + foot + green readiness).
+  // Track 210° arc progress via DeviceOrientation alpha (relative rotation from start).
   useEffect(() => {
-    const stable =
-      cameraState === "readyPhase" &&
-      captureReadiness === "green" &&
-      footDetected &&
-      sheetDetectionState === "green" &&
-      !isVideoRecording;
-
-    if (!stable) {
-      if (stableTimerRef.current) {
-        clearInterval(stableTimerRef.current);
-        stableTimerRef.current = null;
-      }
-      setStabilityPct(0);
+    if (!isVideoRecording) {
+      gyroAccRef.current = 0;
+      gyroLastAlphaRef.current = null;
+      setGyroArcDeg(0);
+      gyroAliveRef.current = false;
+      setGyroAlivePing(false);
       return;
     }
+    gyroAccRef.current = 0;
+    gyroLastAlphaRef.current = null;
+    gyroAliveRef.current = false;
+    setGyroAlivePing(false);
 
-    if (stableTimerRef.current) return; // already counting down
-
-    stableStartRef.current = performance.now();
-    stableTimerRef.current = window.setInterval(() => {
-      const elapsed = performance.now() - stableStartRef.current;
-      const pct = Math.min(100, (elapsed / 2000) * 100);
-      setStabilityPct(pct);
-      if (pct >= 100) {
-        clearInterval(stableTimerRef.current!);
-        stableTimerRef.current = null;
-        setStabilityPct(0);
-        startVideoRecording();
+    const onOrientation = (e: DeviceOrientationEvent) => {
+      const alpha = e.alpha;
+      if (alpha == null) return;
+      const last = gyroLastAlphaRef.current;
+      if (last === null) {
+        gyroLastAlphaRef.current = alpha;
+        return;
       }
-    }, 80);
+      let delta = alpha - last;
+      if (delta > 180) delta -= 360;
+      if (delta < -180) delta += 360;
+      gyroAccRef.current += Math.abs(delta);
+      gyroLastAlphaRef.current = alpha;
 
-    return () => {
-      if (stableTimerRef.current) {
-        clearInterval(stableTimerRef.current);
-        stableTimerRef.current = null;
+      const clamped = Math.min(ARC_TARGET_DEG, gyroAccRef.current);
+      setGyroArcDeg(clamped);
+
+      // Calibration ping: confirm sensor is alive after first ~5°.
+      if (!gyroAliveRef.current && clamped >= 5) {
+        gyroAliveRef.current = true;
+        setGyroAlivePing(true);
+        if ("vibrate" in navigator) navigator.vibrate(18);
+        window.setTimeout(() => setGyroAlivePing(false), 900);
       }
+
+      // Fill bins proportionally so the existing coverage/upload flow triggers at 210°.
+      const bins = orbitBinsTarget;
+      const numFill = Math.floor((clamped / ARC_TARGET_DEG) * bins);
+      setFootScanCoverageBins((prev) => {
+        if (prev.size >= numFill) return prev;
+        const next = new Set<number>();
+        for (let i = 0; i < numFill; i++) next.add(i);
+        const isNewSector = next.size > prev.size;
+        const isComplete = next.size >= bins;
+        if (isComplete) {
+          if (currentFootRef.current === "LEFT") setOrbitCompleteLeft(true);
+          else setOrbitCompleteRight(true);
+          if ("vibrate" in navigator) navigator.vibrate([100, 50, 100]);
+        } else if (isNewSector) {
+          if ("vibrate" in navigator) navigator.vibrate(12);
+        }
+        return next;
+      });
     };
-  }, [cameraState, captureReadiness, footDetected, sheetDetectionState, isVideoRecording, startVideoRecording]);
+
+    window.addEventListener("deviceorientation", onOrientation, true);
+    return () => window.removeEventListener("deviceorientation", onOrientation, true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isVideoRecording, orbitBinsTarget]);
+
+  // Timers removed: Starlink mode completes event-driven when last dot is consumed.
 
   useEffect(() => {
     if (!isVideoRecording) return;
@@ -1339,7 +1834,8 @@ export default function ScannerCattura() {
   const sheetStatusText = useMemo(() => {
     if (sheetDetectionState === "green") return "Perfetto";
     if (sheetDetectionState === "red") return "Inquadra il foglio A4";
-    if (alignment.markerCount < 4) return "Avvicinati al foglio";
+    // Dynamics over rigidity: if we see at least 1 marker, calibration is considered valid.
+    // Keep prompts non-blocking.
     return "Centra il foglio";
   }, [sheetDetectionState, alignment.markerCount]);
 
@@ -1347,20 +1843,18 @@ export default function ScannerCattura() {
   const sheetPositionGuidanceText = useMemo(() => {
     if (!scanOverlayEnabled) return null;
     if (sheetLocked) return null;
-    if (alignment.guide === "too_close") return "Allontanati";
     const t = alignment.tracking;
     if (t.confidence < SHEET_GUIDE_TRACKING_CONF_MIN || alignment.markerCount < 2) return null;
     const dx = t.position.x - 0.5;
     const scale = t.scale;
     if (scale < A4_SHEET_TARGET_SCALE - SHEET_GUIDE_SCALE_TOL_LO) return "Avvicinati";
-    if (scale > A4_SHEET_TARGET_SCALE + SHEET_GUIDE_SCALE_TOL_HI) return "Allontanati";
+    // No blocking "allontanati" — we adapt safe zone instead.
     if (dx < -SHEET_GUIDE_X_TOL) return "Sposta a destra";
     if (dx > SHEET_GUIDE_X_TOL) return "Sposta a sinistra";
     return null;
   }, [
     scanOverlayEnabled,
     sheetLocked,
-    alignment.guide,
     alignment.markerCount,
     alignment.tracking.confidence,
     alignment.tracking.position.x,
@@ -1630,6 +2124,454 @@ export default function ScannerCattura() {
     if (captureImminentGreen) return "green";
     return "yellow";
   }, [scanOverlayEnabled, cameraState, footDetected, footMostlyInsideFrame, captureImminentGreen]);
+
+  const sheetOkForAutoStart = useMemo(() => {
+    // For A4 real-world rotation: don't require 4 markers constantly.
+    // We only need at least one marker seen and not "too close".
+    if (cameraState !== "readyPhase") return false;
+    if ((alignment.markerCount ?? 0) < 1) return false;
+    const quads = alignment.arucoMarkerQuadsNorm ?? [];
+    for (const q of quads) {
+      const cs = (q.corners ?? []).slice(0, 4);
+      if (cs.length < 4) continue;
+      let minY = 1;
+      let maxY = 0;
+      for (const p of cs) {
+        if (!Number.isFinite(p.y)) continue;
+        minY = Math.min(minY, p.y);
+        maxY = Math.max(maxY, p.y);
+      }
+      const heightFrac = Math.max(0, Math.min(1, maxY - minY));
+      if (heightFrac > 0.5) return false;
+    }
+    return true;
+  }, [alignment.arucoMarkerQuadsNorm, alignment.markerCount, cameraState]);
+
+  // ── Starlink dot cloud: generate + consume in RAF, anchored to ArUco tracking ──
+  useEffect(() => {
+    if (!STARLINK_DOT_CLOUD_MODE) return;
+    if (cameraState !== "readyPhase") return;
+    if (!scanStarted) return;
+
+    // (Re)generate when entering readyPhase or switching foot.
+    const seed = Date.now() % 1_000_000;
+    const rnd = (n: number) => {
+      // cheap deterministic pseudo-rng
+      const x = Math.sin((seed + n) * 12_989.23) * 43758.5453;
+      return x - Math.floor(x);
+    };
+
+    // Dome points: spherical Fibonacci distribution on a spherical cap.
+    // Sphere radius R=30cm, cap height h=20cm above ground plane y=0.
+    // Sphere center is below ground by d=R-h => 10cm; y = -d + R*cos(theta) with theta in [0, thetaMax].
+    const R = DOME_RADIUS_CM;
+    const h = DOME_HEIGHT_CM;
+    const d = Math.max(0.001, R - h);
+    const cosThetaMax = Math.max(-1, Math.min(1, d / R)); // y=0 => cos(theta)=d/R
+    const golden = Math.PI * (3 - Math.sqrt(5));
+    const dots: { id: number; yaw: number; pitch: number; consumed: boolean; pop: number }[] = [];
+    for (let i = 0; i < DOT_CLOUD_COUNT; i++) {
+      const u = (i + 0.5) / DOT_CLOUD_COUNT;
+      // Uniform area on cap: cos(theta) uniform between [1 .. cosThetaMax]
+      const cosT = 1 - u * (1 - cosThetaMax);
+      const theta = Math.acos(Math.max(-1, Math.min(1, cosT)));
+      const phi = (i * golden) % (Math.PI * 2);
+
+      // Convert to dome-local yaw/pitch for later collision/projection:
+      // yaw = phi (around y), pitch = arcsin(yNormalized)
+      const yNorm = Math.cos(theta); // 0..1
+      const pitch = Math.asin(Math.max(0, Math.min(1, yNorm))); // 0..pi/2
+      dots.push({ id: i, yaw: phi, pitch, consumed: false, pop: 0 });
+    }
+    dotCloudRef.current = dots;
+    dotCloudConsumedRef.current = 0;
+    dotCloudStartedRef.current = false;
+    dotCloudDoneRef.current = false;
+    setDotCloudProgressPct(0);
+    domeFadeStartAtRef.current = 0;
+    domeOpacityRef.current = 0;
+    domeCenterSmoothedRef.current = null;
+
+    let raf = 0;
+    let cancelled = false;
+
+    const tick = () => {
+      if (cancelled) return;
+      const v = videoRef.current;
+      const box = videoContainerRef.current;
+      if (!v || !box || v.videoWidth === 0) {
+        raf = requestAnimationFrame(tick);
+        return;
+      }
+
+      const canvas = dotCloudCanvasRef.current;
+      const ctx = canvas?.getContext?.("2d") ?? null;
+
+      const now = performance.now();
+      const hasAruco = (alignment.markerCount ?? 0) >= 1;
+      if (hasAruco) lastArucoSeenAtRef.current = now;
+      const arucoRecent = hasAruco || now - lastArucoSeenAtRef.current < 900;
+      if (hasAruco && domeFadeStartAtRef.current === 0) domeFadeStartAtRef.current = now;
+      const fadeT =
+        domeFadeStartAtRef.current > 0 ? Math.min(1, (now - domeFadeStartAtRef.current) / 1000) : 0;
+      // Smoothstep for Apple-like fade
+      domeOpacityRef.current = fadeT * fadeT * (3 - 2 * fadeT);
+
+      // WORLD ANCHOR: center from visible ArUco points (corners preferred, else marker centers, else tracking position).
+      const pts: { x: number; y: number }[] = [];
+      const quads = alignment.arucoMarkerQuadsNorm ?? [];
+      for (const q of quads) {
+        const cs = (q.corners ?? []).slice(0, 4);
+        for (const p of cs) {
+          if (Number.isFinite(p.x) && Number.isFinite(p.y)) pts.push({ x: p.x, y: p.y });
+        }
+      }
+      const centers = alignment.markerCentersNorm ?? [];
+      for (const c of centers) {
+        if (c && Number.isFinite(c.x) && Number.isFinite(c.y)) pts.push({ x: c.x, y: c.y });
+      }
+      const tp = alignment.tracking?.position;
+      if (pts.length === 0 && tp && Number.isFinite(tp.x) && Number.isFinite(tp.y)) pts.push({ x: tp.x, y: tp.y });
+      const rawAnchorNormX = pts.length ? pts.reduce((s, p) => s + p.x, 0) / pts.length : 0.5;
+      const rawAnchorNormY = pts.length ? pts.reduce((s, p) => s + p.y, 0) / pts.length : 0.52;
+
+      // Scale by tracking.scale (elastic). Clamp for stability.
+      const s = alignment.tracking?.scale;
+      const scale = typeof s === "number" && Number.isFinite(s) ? Math.max(0.22, Math.min(0.78, s)) : 0.42;
+
+      // Map anchor to container px (object-fit cover aware).
+      const rect = box.getBoundingClientRect();
+      if (ctx && canvas) {
+        const dpr = Math.max(1, window.devicePixelRatio || 1);
+        const targetW = Math.round(rect.width * dpr);
+        const targetH = Math.round(rect.height * dpr);
+        if (canvas.width !== targetW || canvas.height !== targetH) {
+          canvas.width = targetW;
+          canvas.height = targetH;
+          canvas.style.width = `${rect.width}px`;
+          canvas.style.height = `${rect.height}px`;
+        }
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.scale(dpr, dpr);
+      }
+      const { leftPct, topPct } = normalizedVideoToContainerPercent(
+        rawAnchorNormX,
+        rawAnchorNormY,
+        v.videoWidth,
+        v.videoHeight,
+        rect.width,
+        rect.height
+      );
+      const anchorPxRawX = (leftPct / 100) * rect.width;
+      const anchorPxRawY = (topPct / 100) * rect.height;
+
+      // Jitter reduction: smooth anchor + scale.
+      const prev = domeCenterSmoothedRef.current;
+      const kLerp = 0.14; // stable even with fast arm motion
+      const sm = prev
+        ? {
+            x: prev.x + (anchorPxRawX - prev.x) * kLerp,
+            y: prev.y + (anchorPxRawY - prev.y) * kLerp,
+            scale: prev.scale + (scale - prev.scale) * kLerp,
+          }
+        : { x: anchorPxRawX, y: anchorPxRawY, scale };
+      domeCenterSmoothedRef.current = sm;
+      const anchorPxX = sm.x;
+      const anchorPxY = sm.y;
+      const scaleSmooth = sm.scale;
+
+      // Reticle is always screen center.
+      const retX = rect.width * 0.5;
+      const retY = rect.height * 0.5;
+      // Much more forgiving: user should "sweep" points effortlessly.
+      // Kept for reticle drawing only (collision is angular in 3D).
+      const hitRadiusPx = Math.max(40, Math.min(76, rect.width * 0.14));
+
+      let consumedThisFrame = false;
+      if (ctx) {
+        // Reticle (Starlink-like)
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = "rgba(255,255,255,0.22)";
+        ctx.beginPath();
+        ctx.arc(retX, retY, hitRadiusPx * 0.58, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.lineWidth = 1;
+        ctx.strokeStyle = "rgba(255,255,255,0.08)";
+        ctx.beginPath();
+        ctx.arc(retX, retY, hitRadiusPx * 0.28, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.fillStyle = "rgba(255,255,255,0.10)";
+        ctx.beginPath();
+        ctx.arc(retX, retY, 2.2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      // FADE-IN: before ArUco is detected, keep UI minimal (reticle only).
+      // After detection, dome appears over 1s.
+      if (ctx && domeOpacityRef.current > 0) {
+        ctx.globalAlpha = domeOpacityRef.current;
+      }
+
+      // Dome hint: thin meridians/parallels (very subtle).
+      if (ctx) {
+        ctx.save();
+        ctx.globalAlpha = 0.22 * domeOpacityRef.current;
+        ctx.strokeStyle = "rgba(34,211,238,0.18)";
+        ctx.lineWidth = 1;
+        const meridians = 6;
+        const parallels = 4;
+        const project = (yaw0: number, pitch0: number) => {
+          const vx = Math.cos(pitch0) * Math.cos(yaw0);
+          const vy = Math.sin(pitch0);
+          const vz = Math.cos(pitch0) * Math.sin(yaw0);
+          const right = { x: -Math.sin(yaw), y: 0, z: Math.cos(yaw) };
+          const up = {
+            x: -Math.sin(pitch) * Math.cos(yaw),
+            y: Math.cos(pitch),
+            z: -Math.sin(pitch) * Math.sin(yaw),
+          };
+          const sx = vx * right.x + vy * right.y + vz * right.z;
+          const sy = vx * up.x + vy * up.y + vz * up.z;
+          const sz = vx * fwd.x + vy * fwd.y + vz * fwd.z;
+          const k = sz <= 0.05 ? 0.05 : sz;
+          return {
+            x: anchorPxX + (sx / k) * domeRadiusPx * fov,
+            y: anchorPxY - (sy / k) * domeRadiusPx * fov,
+          };
+        };
+        // Parallels (constant pitch)
+        for (let j = 1; j <= parallels; j++) {
+          const p0 = ((j / (parallels + 1)) * 0.9) * (Math.PI / 2);
+          ctx.beginPath();
+          for (let k = 0; k <= 40; k++) {
+            const t = k / 40;
+            const y0 = (150 * Math.PI) / 180 + t * (210 * Math.PI) / 180;
+            const pt = project(y0, p0);
+            if (k === 0) ctx.moveTo(pt.x, pt.y);
+            else ctx.lineTo(pt.x, pt.y);
+          }
+          ctx.stroke();
+        }
+        // Meridians (constant yaw)
+        for (let i = 0; i < meridians; i++) {
+          const t = i / Math.max(1, meridians - 1);
+          const y0 = (150 + t * 210) * (Math.PI / 180);
+          ctx.beginPath();
+          for (let k = 0; k <= 28; k++) {
+            const s = k / 28;
+            const p0 = s * (Math.PI / 2) * 0.95;
+            const pt = project(y0, p0);
+            if (k === 0) ctx.moveTo(pt.x, pt.y);
+            else ctx.lineTo(pt.x, pt.y);
+          }
+          ctx.stroke();
+        }
+        ctx.restore();
+      }
+
+      // If no ArUco, keep drawing reticle only (do not consume points).
+      if (!arucoRecent) {
+        raf = requestAnimationFrame(tick);
+        return;
+      }
+      // "3D collision": compute phone view direction from tilt (yaw around arc + pitch up/down).
+      const yawDeg = orbitAngleDegFromTilt(frameTilt.rotateY, frameTilt.rotateZ) ?? 0;
+      const yaw = (yawDeg * Math.PI) / 180;
+      // rotateX: positive => phone too low (tilting down). We want pitch up/down around foot.
+      const pitch = (-frameTilt.rotateX * Math.PI) / 180;
+
+      // Forward direction in dome-local coords (y up).
+      const fwd = {
+        x: Math.cos(pitch) * Math.cos(yaw),
+        y: Math.sin(pitch),
+        z: Math.cos(pitch) * Math.sin(yaw),
+      };
+
+      // Visual projection for hints (simple perspective).
+      const fov = 0.9; // radians-ish factor, tuned for "AR dome" feel
+      // Map physical dome radius (30cm) onto screen using tracking scale (relative to A4).
+      // A4 width ~21cm; dome radius 30cm => 1.43× A4 width in world.
+      const domeRadiusPx = rect.width * (0.34 * scaleSmooth) * (DOME_RADIUS_CM / 21);
+
+      for (const d of dotCloudRef.current) {
+        // Pop animation decay
+        if (d.pop > 0) d.pop = Math.max(0, d.pop - 0.06);
+
+        // Dot direction vector on hemisphere (yaw around, pitch up).
+        const vx = Math.cos(d.pitch) * Math.cos(d.yaw);
+        const vy = Math.sin(d.pitch);
+        const vz = Math.cos(d.pitch) * Math.sin(d.yaw);
+
+        // Angle-to-forward controls collision (easy hit).
+        const dotp = vx * fwd.x + vy * fwd.y + vz * fwd.z;
+        const ang = Math.acos(Math.max(-1, Math.min(1, dotp)));
+
+        // Project to screen for visual hint (approx): map relative to forward onto plane.
+        // Build a simple camera basis from yaw/pitch (no roll).
+        const right = { x: -Math.sin(yaw), y: 0, z: Math.cos(yaw) };
+        const up = {
+          x: -Math.sin(pitch) * Math.cos(yaw),
+          y: Math.cos(pitch),
+          z: -Math.sin(pitch) * Math.sin(yaw),
+        };
+        const rel = { x: vx, y: vy, z: vz };
+        const sx = rel.x * right.x + rel.y * right.y + rel.z * right.z;
+        const sy = rel.x * up.x + rel.y * up.y + rel.z * up.z;
+        const sz = rel.x * fwd.x + rel.y * fwd.y + rel.z * fwd.z;
+
+        // If behind the view, clamp offscreen.
+        const k = sz <= 0.05 ? 0.05 : sz;
+        const px = anchorPxX + (sx / k) * domeRadiusPx * fov;
+        const py = anchorPxY - (sy / k) * domeRadiusPx * fov;
+
+        // Occlusion hint: darker when "behind" (low sz).
+        const depth = Math.max(0, Math.min(1, (sz + 0.25) / 1.25));
+        const baseSize = 4.2 + (1 - depth) * 0.9;
+
+        if (ctx) {
+          if (d.consumed) {
+            if (d.pop > 0) {
+              const k = d.pop;
+              ctx.globalAlpha = 0.65 * k;
+              ctx.strokeStyle = "rgba(34,211,238,0.95)";
+              ctx.lineWidth = 2;
+              ctx.beginPath();
+              ctx.arc(px, py, baseSize + (1 - k) * 18, 0, Math.PI * 2);
+              ctx.stroke();
+              ctx.globalAlpha = 0.22 * k;
+              ctx.fillStyle = "rgba(34,211,238,0.95)";
+              ctx.beginPath();
+              ctx.arc(px, py, Math.max(0.5, baseSize * k), 0, Math.PI * 2);
+              ctx.fill();
+              ctx.globalAlpha = 1;
+            }
+          } else {
+            ctx.globalAlpha = (0.55 + depth * 0.18) * domeOpacityRef.current;
+            ctx.fillStyle = depth < 0.35 ? "rgba(34,211,238,0.52)" : "rgba(34,211,238,0.86)";
+            ctx.shadowColor = "rgba(34,211,238,0.40)";
+            ctx.shadowBlur = 10 + depth * 6;
+            ctx.beginPath();
+            ctx.arc(px, py, baseSize, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.shadowBlur = 0;
+            ctx.globalAlpha = 1;
+          }
+        }
+
+        if (d.consumed) continue;
+        // 3D hit: within angular threshold (elastic).
+        const hit = ang <= (12 * Math.PI) / 180;
+        if (hit) {
+          d.consumed = true;
+          d.pop = 1;
+          consumedThisFrame = true;
+          dotCloudConsumedRef.current += 1;
+          {
+            const pct = Math.round((dotCloudConsumedRef.current / DOT_CLOUD_COUNT) * 100);
+            dotCloudProgressRef.current = pct;
+            // keep React state for non-debug UI at low frequency only
+            if (pct === 0 || pct === 100 || Math.abs(pct - dotCloudProgressPct) >= 10) {
+              setDotCloudProgressPct(pct);
+            }
+          }
+          if ("vibrate" in navigator) navigator.vibrate(10);
+
+          // Start video on first consumed dot.
+          if (!dotCloudStartedRef.current) {
+            dotCloudStartedRef.current = true;
+            startVideoRecording();
+          }
+
+          // Stop when last dot consumed.
+          if (dotCloudConsumedRef.current >= DOT_CLOUD_COUNT) {
+            setDotCloudSuccessFlash(true);
+            void stopAndUploadDotCloud();
+          }
+          break; // one dot per frame max
+        }
+      }
+
+      // Light decay pop for consumed dots (visual only).
+      if (!consumedThisFrame) {
+        // no-op
+      }
+
+      raf = requestAnimationFrame(tick);
+    };
+
+    raf = requestAnimationFrame(tick);
+    return () => {
+      cancelled = true;
+      cancelAnimationFrame(raf);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    cameraState,
+    currentFoot,
+    scanStarted,
+    frameTilt.rotateY,
+    frameTilt.rotateZ,
+    alignment.tracking,
+    alignment.tracking?.position,
+    alignment.tracking?.scale,
+    startVideoRecording,
+    stopAndUploadDotCloud,
+  ]);
+
+  // Auto-start: begin recording only after 1.5s of stable alignment (sheet + foot + stable phone).
+  useEffect(() => {
+    if (STARLINK_DOT_CLOUD_MODE) return;
+    const stable =
+      cameraState === "readyPhase" &&
+      captureReadiness === "green" &&
+      footDetected &&
+      sheetOkForAutoStart &&
+      cameraMotionGateOk &&
+      sensorsUnlocked &&
+      !isVideoRecording;
+
+    if (!stable) {
+      if (stableTimerRef.current) {
+        clearInterval(stableTimerRef.current);
+        stableTimerRef.current = null;
+      }
+      setStabilityPct(0);
+      return;
+    }
+
+    if (stableTimerRef.current) return; // already counting down
+
+    stableStartRef.current = performance.now();
+    stableTimerRef.current = window.setInterval(() => {
+      const elapsed = performance.now() - stableStartRef.current;
+      const pct = Math.min(100, (elapsed / 500) * 100);
+      setStabilityPct(pct);
+      if (pct >= 100) {
+        clearInterval(stableTimerRef.current!);
+        stableTimerRef.current = null;
+        setStabilityPct(0);
+        // Starlink mode: start on first dot consumed, not on stability.
+        if (!STARLINK_DOT_CLOUD_MODE) startVideoRecording();
+      }
+    }, 80);
+
+    return () => {
+      if (stableTimerRef.current) {
+        clearInterval(stableTimerRef.current);
+        stableTimerRef.current = null;
+      }
+    };
+  }, [
+    cameraMotionGateOk,
+    cameraState,
+    captureReadiness,
+    footDetected,
+    isVideoRecording,
+    sensorsUnlocked,
+    sheetOkForAutoStart,
+    startVideoRecording,
+  ]);
   const sheetTooFar =
     alignment.tracking.confidence >= 0.12 && alignment.tracking.scale < A4_TRACKING_SCALE_MIN;
 
@@ -1648,14 +2590,14 @@ export default function ScannerCattura() {
     sheetFullyFramed: true,
     sheetTooClose: alignment.guide === "too_close",
     sheetTooFar,
-    arucoEngine: alignment.arucoEngine,
+    arucoEngine: alignment.arucoEngine === "error" ? "fallback" : alignment.arucoEngine,
     zonesComplete: pathZonesComplete,
     footInsideA4: footOnSheetOk,
     fallbackCaptureMessaging: captureFallbackArmed,
     continuousScanMode: true,
   });
 
-  const beginnerNudgeActive = tooSlow && !footScanCoverageComplete;
+  const beginnerNudgeActive = !STARLINK_DOT_CLOUD_MODE && tooSlow && !footScanCoverageComplete;
 
   /** Next uncaptured bin clockwise from current angle — drives the guide orb. */
   const nextMissingBin = useMemo(() => {
@@ -1672,16 +2614,28 @@ export default function ScannerCattura() {
     return null;
   }, [beginnerNudgeActive, footScanCoverageComplete, orbitBinsTarget, liveOrbitAngleDeg, footScanCoverageBins]);
 
-  /** Sheet distance — drives ring colour and warning text. */
-  const sheetDistanceWarning = useMemo((): "too_close" | "too_far" | null => {
-    if (cameraState !== "readyPhase") return null;
-    if (alignment.guide === "too_close") return "too_close";
-    if (alignment.tracking.confidence >= 0.12) {
-      if (alignment.tracking.scale > A4_TRACKING_SCALE_MAX) return "too_close";
-      if (alignment.tracking.scale < A4_TRACKING_SCALE_MIN) return "too_far";
+  /** Dynamics over rigidity: never block user with distance warnings. */
+  const sheetDistanceWarning = null as "too_close" | "too_far" | null;
+
+  /** Marker size (0–1 of frame height). Used to adapt "safe zone" dynamically (non-blocking). */
+  const markerHeightFrac = useMemo(() => {
+    const quads = alignment.arucoMarkerQuadsNorm ?? [];
+    let best = 0;
+    for (const q of quads) {
+      const cs = (q.corners ?? []).slice(0, 4);
+      if (cs.length < 4) continue;
+      let minY = 1;
+      let maxY = 0;
+      for (const p of cs) {
+        if (!Number.isFinite(p.y)) continue;
+        minY = Math.min(minY, p.y);
+        maxY = Math.max(maxY, p.y);
+      }
+      const h = Math.max(0, Math.min(1, maxY - minY));
+      best = Math.max(best, h);
     }
-    return null;
-  }, [cameraState, alignment.guide, alignment.tracking.confidence, alignment.tracking.scale]);
+    return best;
+  }, [alignment.arucoMarkerQuadsNorm]);
 
   /** UX premium: feedback binario (verde=ok, rosso=correggi) */
   const scanBinaryOk = useMemo(() => captureReadiness === "green", [captureReadiness]);
@@ -1761,6 +2715,7 @@ export default function ScannerCattura() {
 
   /** Vignetta full-frame: verde = OK istantaneo, ambra = quasi, rosso = correggi. */
   const scanFeedbackOverlayBackground = useMemo(() => {
+    if (STARLINK_DOT_CLOUD_MODE) return "transparent";
     if (!scanOverlayEnabled) return "transparent";
     const base =
       "radial-gradient(circle at 50% 50%, rgba(0,0,0,0) 22%, rgba(0,0,0,0.10) 65%, rgba(0,0,0,0.20) 100%)";
@@ -1771,6 +2726,7 @@ export default function ScannerCattura() {
   }, [scanOverlayEnabled, scanBinaryOk]);
 
   const scanFeedbackOverlayShadow = useMemo(() => {
+    if (STARLINK_DOT_CLOUD_MODE) return undefined;
     if (!scanOverlayEnabled || !scanBinaryOk) return undefined;
     return "inset 0 0 80px rgba(52,211,153,0.10)";
   }, [scanOverlayEnabled, scanBinaryOk]);
@@ -2361,17 +3317,9 @@ export default function ScannerCattura() {
     if (!videoRef.current) throw new Error("Video element assente.");
     const video = videoRef.current;
     const candidates: MediaTrackConstraints[] = [
-      {
-        facingMode: "environment",
-        width: { ideal: 1280 },
-        height: { ideal: 720 },
-      },
-      {
-        facingMode: "environment",
-        width: { ideal: 640 },
-        height: { ideal: 480 },
-      },
-      // Android fallback: omit resolution constraints (some devices return black frames otherwise)
+      // Universal range: prefer 1080p, accept 720p minimum.
+      { facingMode: "environment", width: { ideal: 1920, min: 1280 }, height: { ideal: 1080, min: 720 } },
+      // Fallback: loosen resolution but keep rear camera intent.
       { facingMode: { ideal: "environment" } },
       // Last resort: let the browser pick any camera
       true as unknown as MediaTrackConstraints,
@@ -2383,6 +3331,16 @@ export default function ScannerCattura() {
       try {
         stream = await getStream(c);
         streamRef.current = stream;
+        try {
+          const track = stream.getVideoTracks?.()[0];
+          if ((track as unknown as { applyConstraints?: (c: unknown) => Promise<void> })?.applyConstraints) {
+            await (track as unknown as { applyConstraints: (c: unknown) => Promise<void> }).applyConstraints({
+              advanced: [{ focusMode: "continuous", exposureMode: "continuous" }],
+            });
+          }
+        } catch {
+          // ignore
+        }
         prepareVideoElement(video);
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         (video as any).srcObject = stream;
@@ -2470,6 +3428,8 @@ export default function ScannerCattura() {
     try {
       void requestOrientationAccess();
       setCameraState("readyPhase");
+      setSensorsUnlocked(false);
+      setSensorsPromptVisible(true);
 
       // Supabase: create scan row in background (non-blocking).
       createNewScan()
@@ -3231,7 +4191,15 @@ export default function ScannerCattura() {
   }, [cameraState, pairComplete]);
 
   return (
-    <div className="absolute left-0 top-0 z-50 h-screen w-screen bg-black">{/* NO overflow-hidden: clips video compositor on Android Chrome */}
+    <div
+      className="absolute left-0 top-0 z-50 bg-black"
+      style={{
+        width: "100vw",
+        height: "100vh",
+        overflow: "hidden",
+        touchAction: "none",
+      }}
+    >
       <style>{`
         @keyframes neuma-scan-valid-breathe {
           0%, 100% {
@@ -3259,7 +4227,7 @@ export default function ScannerCattura() {
         }
       `}</style>
 
-      {cameraState === "readyPhase" ? (
+      {cameraState === "readyPhase" && !STARLINK_DOT_CLOUD_MODE ? (
         <div
           className="pointer-events-none absolute right-3 top-14 z-[94] flex max-w-[min(92vw,16rem)] sm:right-4 sm:top-16"
           aria-live="polite"
@@ -3275,6 +4243,211 @@ export default function ScannerCattura() {
               </div>
               <div className="text-[11px] font-medium text-white/80">Dal video, automatica</div>
             </div>
+          </div>
+        </div>
+      ) : null}
+
+      {!STARLINK_DOT_CLOUD_MODE && gyroAlivePing ? (
+        <div className="pointer-events-none absolute left-3 top-14 z-[94] sm:left-4 sm:top-16" aria-live="polite">
+          <div className="rounded-full border border-white/14 bg-black/55 px-3 py-1.5 text-[10px] font-medium tracking-[0.12em] text-white/75 backdrop-blur-xl">
+            GYRO OK
+          </div>
+        </div>
+      ) : null}
+
+      {!scanStarted && cameraState === "readyPhase" ? (
+        <div className="pointer-events-auto absolute inset-0 z-[96] flex items-center justify-center px-6">
+          <button
+            type="button"
+            onClick={async () => {
+              if (!portraitOk) return;
+              if (openCvStatus !== "ready") return;
+              setBootError(null);
+              setBooting(true);
+              try {
+                await acquireCameraStream();
+                try {
+                  const DOE = DeviceOrientationEvent as unknown as { requestPermission?: () => Promise<"granted" | "denied"> };
+                  if (typeof DOE?.requestPermission === "function") {
+                    await DOE.requestPermission().catch(() => "denied");
+                  }
+                } catch {}
+                try {
+                  const DME = DeviceMotionEvent as unknown as { requestPermission?: () => Promise<"granted" | "denied"> };
+                  if (typeof DME?.requestPermission === "function") {
+                    await DME.requestPermission().catch(() => "denied");
+                  }
+                } catch {}
+                try {
+                  const AC = (window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext) as
+                    | typeof AudioContext
+                    | undefined;
+                  if (AC) {
+                    const ctx = new AC();
+                    await ctx.resume().catch(() => {});
+                    await ctx.close().catch(() => {});
+                  }
+                } catch {}
+
+                await unlockSensorsFromGesture();
+                setScanStarted(true);
+              } catch (e) {
+                const msg = e instanceof Error ? e.message : String(e);
+                setBootError(msg || "Impossibile avviare lo scanner.");
+              } finally {
+                setBooting(false);
+              }
+            }}
+            className="w-full max-w-sm rounded-full border border-white/14 bg-white/10 py-6 text-center text-[15px] font-semibold tracking-[0.06em] text-white backdrop-blur-2xl transition-colors duration-150 active:bg-white/15"
+            aria-label="Avvia scanner"
+            disabled={openCvStatus !== "ready" || booting}
+          >
+            {openCvStatus === "loading"
+              ? "Inizializzazione motore AI (WASM)..."
+              : openCvStatus === "error"
+                ? "ERRORE OPENCV"
+                : booting
+                  ? "AVVIO..."
+                  : "AVVIA SCANNER"}
+          </button>
+          {openCvStatus === "loading" && showForceRefresh ? (
+            <button
+              type="button"
+              onClick={forceHardRefresh}
+              className="mt-3 rounded-xl border border-white/10 bg-black/40 px-4 py-2 text-[12px] font-semibold tracking-[0.08em] text-white/75 backdrop-blur-2xl"
+            >
+              FORZA REFRESH
+            </button>
+          ) : null}
+          {openCvStatus === "error" && openCvError ? (
+            <div className="pointer-events-none absolute bottom-[22%] left-1/2 w-[min(92vw,30rem)] -translate-x-1/2 text-center">
+              <div className="rounded-2xl border border-red-300/18 bg-black/65 px-4 py-3 text-[12px] font-medium text-red-100/85 backdrop-blur-2xl">
+                {openCvError}
+              </div>
+            </div>
+          ) : null}
+          {openCvStatus === "error" && openCvFetchDiag ? (
+            <div className="pointer-events-none absolute bottom-[8%] left-1/2 w-[min(92vw,34rem)] -translate-x-1/2 text-center">
+              <div className="rounded-2xl border border-white/10 bg-black/55 px-4 py-3 text-left font-mono text-[10px] leading-snug text-white/70 backdrop-blur-2xl whitespace-pre-wrap">
+                {openCvFetchDiag}
+              </div>
+            </div>
+          ) : null}
+          {bootError ? (
+            <div className="pointer-events-none absolute bottom-[14%] left-1/2 w-[min(92vw,28rem)] -translate-x-1/2 text-center">
+              <div className="rounded-2xl border border-white/10 bg-black/60 px-4 py-3 text-[12px] font-medium text-white/75 backdrop-blur-2xl">
+                {bootError}
+              </div>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
+      {STARLINK_DOT_CLOUD_MODE && cameraState === "readyPhase" && openCvStatus === "error" ? (
+        <div className="pointer-events-auto absolute inset-0 z-[98] flex items-center justify-center px-6">
+          <div className="w-full max-w-md rounded-3xl border border-red-300/18 bg-black/70 p-6 text-center text-white backdrop-blur-2xl">
+            <div className="text-[11px] font-semibold tracking-[0.18em] text-red-200/85 uppercase">
+              OpenCV non disponibile
+            </div>
+            <div className="mt-2 text-[18px] font-semibold tracking-tight">
+              Impossibile inizializzare il motore ArUco.
+            </div>
+            <div className="mt-3 text-[12px] text-white/55">
+              {openCvError || "Errore inizializzazione OpenCV."}
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {!portraitOk ? (
+        <div className="pointer-events-auto absolute inset-0 z-[99] flex items-center justify-center px-6">
+          <div className="w-full max-w-md rounded-3xl border border-white/10 bg-black/80 p-6 text-center text-white backdrop-blur-2xl">
+            <div className="text-[11px] font-semibold tracking-[0.18em] text-white/70 uppercase">Orientamento</div>
+            <div className="mt-2 text-[18px] font-semibold tracking-tight">Per favore, tieni il telefono in verticale</div>
+            <div className="mt-3 text-[12px] text-white/50">Ruota lo schermo in portrait per continuare la scansione.</div>
+          </div>
+        </div>
+      ) : null}
+
+      {/* Aggressive debug: analysis status (DOM-updated, no React state churn) */}
+      {cameraState === "readyPhase" ? (
+        <div className="pointer-events-none absolute left-3 top-[max(0.75rem,env(safe-area-inset-top))] z-[96]">
+          <div className="rounded-xl border border-white/10 bg-black/65 px-3 py-2 text-[11px] font-medium text-white/75 backdrop-blur-2xl">
+            <div>
+              <span className="text-white/45">FPS:</span>{" "}
+              <span id="debug-fps" ref={debugFpsElRef} className="text-white/85">0</span>
+            </div>
+            <div className="mt-0.5">
+              <span className="text-white/45">Markers:</span>{" "}
+              <span id="debug-markers" ref={debugMarkersElRef} className="text-emerald-200/90">0</span>
+            </div>
+            <div className="mt-0.5">
+              <span className="text-white/45">Dict:</span>{" "}
+              <span className="text-white/70">{alignment.arucoDictionary ?? "-"}</span>
+            </div>
+            {alignment.arucoIdsRaw?.length ? (
+              <div className="mt-0.5">
+                <span className="text-white/45">IDs:</span>{" "}
+                <span className="text-white/60">{alignment.arucoIdsRaw.join(",")}</span>
+              </div>
+            ) : null}
+            <div className="mt-0.5">
+              <span className="text-white/45">WASM:</span>{" "}
+              <span id="debug-wasm" ref={debugWasmElRef} className="text-white/70">loading</span>
+            </div>
+            <div className="mt-0.5">
+              <span className="text-white/45">Detect:</span>{" "}
+              <span id="debug-detect" ref={debugDetectElRef} className="text-white/75">0ms</span>
+            </div>
+            <div id="debug-err" ref={debugErrElRef} className="mt-1 max-w-[16rem] break-words text-[10px] leading-snug text-red-200/80" />
+          </div>
+        </div>
+      ) : null}
+
+      {/* One overlay canvas for green marker boxes (direct draw) */}
+      {cameraState === "readyPhase" ? (
+        <canvas ref={debugCanvasRef} className="pointer-events-none absolute inset-0 z-[19]" aria-hidden />
+      ) : null}
+
+      {/* Mini debug view: analysis (B/W) buffer */}
+      {cameraState === "readyPhase" && (STARLINK_DOT_CLOUD_MODE ? openCvAruco.snapshot.pipCanvas : alignment.analysisPreviewCanvas) ? (
+        <div className="pointer-events-none absolute bottom-3 right-3 z-[96] overflow-hidden rounded-2xl border border-emerald-300/20 bg-black/60 backdrop-blur-2xl">
+          <canvas
+            ref={(el) => {
+              if (!el) return;
+              const src = STARLINK_DOT_CLOUD_MODE ? openCvAruco.snapshot.pipCanvas : alignment.analysisPreviewCanvas;
+              if (!src) return;
+              const ctx = el.getContext("2d");
+              if (!ctx) return;
+              const w = 150;
+              const h = 150;
+              if (el.width !== w || el.height !== h) {
+                el.width = w;
+                el.height = h;
+                el.style.width = `${w}px`;
+                el.style.height = `${h}px`;
+              }
+              ctx.clearRect(0, 0, w, h);
+              ctx.imageSmoothingEnabled = false;
+              ctx.drawImage(src, 0, 0, w, h);
+            }}
+            style={{ width: 150, height: 150, imageRendering: "pixelated" as const }}
+          />
+        </div>
+      ) : null}
+
+      {STARLINK_DOT_CLOUD_MODE && scanStarted && cameraState === "readyPhase" && (openCvAruco.snapshot.markerCount ?? 0) < 1 ? (
+        <div className="pointer-events-none absolute inset-x-0 top-0 z-[95] flex justify-center px-5 pt-[max(1rem,env(safe-area-inset-top))]">
+          <div className="max-w-sm rounded-full border border-white/10 bg-black/55 px-4 py-2 text-[13px] font-medium text-white/80 backdrop-blur-2xl">
+            Inquadra almeno un marker ArUco sul foglio
+          </div>
+        </div>
+      ) : null}
+
+      {STARLINK_DOT_CLOUD_MODE && dotCloudSuccessFlash ? (
+        <div className="pointer-events-none absolute inset-0 z-[97] flex items-center justify-center">
+          <div className="rounded-full border border-cyan-400/18 bg-black/55 px-5 py-3 text-[14px] font-semibold tracking-tight text-cyan-100 backdrop-blur-2xl">
+            Scansione terminata con successo
           </div>
         </div>
       ) : null}
@@ -3303,6 +4476,14 @@ export default function ScannerCattura() {
             style={{ width: "100%", height: "100%", objectFit: "cover" }}
           />
 
+          {STARLINK_DOT_CLOUD_MODE ? (
+            <canvas
+              ref={dotCloudCanvasRef}
+              className="pointer-events-none absolute inset-0 z-[62]"
+              aria-hidden
+            />
+          ) : null}
+
           <div
             style={{
               position: "absolute",
@@ -3325,16 +4506,12 @@ export default function ScannerCattura() {
         </div>
       ) : null}
 
-      {/* Black camera fallback: force a user gesture */}
-      {!NO_SCANNER_OVERLAYS && cameraState === "readyPhase" && !hasLivePreview ? (
+      {/* Black camera fallback: in zero-touch mode we rely on a global tap gesture (no visible buttons). */}
+      {!NO_SCANNER_OVERLAYS && !ZERO_TOUCH_SCANNER && cameraState === "readyPhase" && !hasLivePreview ? (
         <div className="pointer-events-auto absolute inset-x-0 bottom-0 z-[92] flex justify-center px-5 pb-[max(2rem,env(safe-area-inset-bottom))]">
           <div className="w-full max-w-sm rounded-3xl border border-white/10 bg-white/[0.03] px-5 py-6 text-center backdrop-blur-2xl">
-            <p className="text-base font-semibold tracking-tight text-white">
-              Attiva la fotocamera
-            </p>
-            <p className="mt-1.5 text-[13px] text-white/55">
-              Tocca per sbloccare l&apos;anteprima.
-            </p>
+            <p className="text-base font-semibold tracking-tight text-white">Attiva la fotocamera</p>
+            <p className="mt-1.5 text-[13px] text-white/55">Tocca per sbloccare l&apos;anteprima.</p>
             <div className="mt-5 flex flex-col gap-2.5">
               <Button
                 type="button"
@@ -3346,9 +4523,7 @@ export default function ScannerCattura() {
               >
                 Avvia fotocamera
               </Button>
-              {cameraOverlayError ? (
-                <p className="px-1 text-[11px] text-white/35">{cameraOverlayError}</p>
-              ) : null}
+              {cameraOverlayError ? <p className="px-1 text-[11px] text-white/35">{cameraOverlayError}</p> : null}
               <Button
                 type="button"
                 variant="outline"
@@ -3374,8 +4549,8 @@ export default function ScannerCattura() {
         />
       ) : null}
 
-      {/* ── Ghost foot guide — dashed cyan silhouette, fades when foot is detected ── */}
-      {scanOverlayEnabled && sheetDetectionState === "green" && !footScanCoverageComplete ? (
+      {/* ── Ghost foot guide — hide in pure Starlink mode ── */}
+      {scanOverlayEnabled && !STARLINK_DOT_CLOUD_MODE && sheetDetectionState === "green" && !footScanCoverageComplete ? (
         <div
           className="pointer-events-none absolute left-1/2 top-1/2 z-[52] -translate-x-1/2 -translate-y-[54%]"
           style={{
@@ -3385,7 +4560,7 @@ export default function ScannerCattura() {
           aria-hidden
         >
           <svg
-            width="84" height="140" viewBox="0 0 84 140" fill="none"
+            width="78" height="132" viewBox="0 0 84 140" fill="none"
             style={{ transform: currentFoot === "RIGHT" ? "scaleX(-1)" : "none" }}
           >
             {/* Main foot body */}
@@ -3412,187 +4587,43 @@ export default function ScannerCattura() {
         </div>
       ) : null}
 
-      {/* ── Center reticle: 36-segment compass ring + guide orb ── */}
-      {!NO_SCANNER_OVERLAYS && cameraState === "readyPhase" ? (
-        <div className="pointer-events-none absolute left-1/2 top-1/2 z-[60] flex -translate-x-1/2 -translate-y-1/2 flex-col items-center">
-          <div className="relative h-[200px] w-[200px]">
-            <svg className="absolute inset-0 h-full w-full" viewBox="0 0 200 200" aria-hidden>
-              <defs>
-                <style>{`
-                  @keyframes neumaRingPulse {
-                    0%,100% { opacity: 0.28; }
-                    50%     { opacity: 0.85; }
-                  }
-                  .neuma-dist-seg { animation: neumaRingPulse 1.1s ease-in-out infinite; }
-                  @keyframes neumaOrbBeat {
-                    0%,100% { opacity: 0.70; r: 4; }
-                    50%     { opacity: 1.00; r: 5.5; }
-                  }
-                  .neuma-orb { animation: neumaOrbBeat 0.85s ease-in-out infinite; }
-                `}</style>
-              </defs>
-
-              {/* Stability ring — cyan arc outside segments, fills 0→100% over 2s */}
-              {stabilityPct > 0 ? (() => {
-                const rs = 82;
-                const cs = 2 * Math.PI * rs;
-                const ds = cs * (stabilityPct / 100);
-                return (
-                  <circle
-                    cx="100" cy="100" r={rs} fill="none"
-                    stroke="rgba(34,211,238,0.72)"
-                    strokeWidth="2.2"
-                    strokeLinecap="round"
-                    strokeDasharray={`${ds} ${cs - ds}`}
-                    transform="rotate(-90 100 100)"
-                    style={{ filter: "drop-shadow(0 0 6px rgba(34,211,238,0.65))" }}
-                  />
-                );
-              })() : null}
-
-              {/* 36 wedge segments — cyan when aligned + recording, emerald when captured */}
-              {Array.from({ length: orbitBinsTarget }, (_, i) => {
-                const isCaptured = footScanCoverageBins.has(i);
-                const isGuide = i === nextMissingBin;
-                const degPerSeg = 360 / orbitBinsTarget;
-                const gapDeg = 2;
-                const t0 = coverageDegToRad(i * degPerSeg + gapDeg / 2);
-                const t1 = coverageDegToRad((i + 1) * degPerSeg - gapDeg / 2);
-                const d = donutWedgePath(100, 100, 67, 76, t0, t1);
-                if (isGuide) {
-                  return (
-                    <path
-                      key={i} d={d}
-                      fill="rgba(251,191,36,0.90)"
-                      style={{ filter: "drop-shadow(0 0 5px rgba(251,191,36,0.78))" }}
-                    />
-                  );
-                }
-                if (isCaptured) {
-                  return (
-                    <path
-                      key={i} d={d}
-                      fill="rgba(34,211,238,0.88)"
-                      style={{ filter: "drop-shadow(0 0 4px rgba(34,211,238,0.62))" }}
-                    />
-                  );
-                }
-                return (
-                  <path
-                    key={i} d={d}
-                    fill={sheetDistanceWarning ? "rgba(239,68,68,0.30)" : isVideoRecording && captureReadiness === "green" ? "rgba(34,211,238,0.12)" : "rgba(255,255,255,0.10)"}
-                    className={sheetDistanceWarning ? "neuma-dist-seg" : undefined}
-                    style={sheetDistanceWarning ? { animationDelay: `${(i / orbitBinsTarget) * 0.4}s` } : undefined}
-                  />
-                );
-              })}
-
-              {/* Guide orb — bright golden dot at next missing segment */}
-              {nextMissingBin != null ? (() => {
-                const degPerSeg = 360 / orbitBinsTarget;
-                const mid = coverageDegToRad((nextMissingBin + 0.5) * degPerSeg);
-                const r = 71.5;
-                return (
-                  <circle
-                    cx={100 + r * Math.cos(mid)}
-                    cy={100 + r * Math.sin(mid)}
-                    r="4"
-                    fill="rgba(251,191,36,0.96)"
-                    className="neuma-orb"
-                    style={{ filter: "drop-shadow(0 0 8px rgba(251,191,36,0.88))" }}
-                  />
-                );
-              })() : null}
-
-              {/* Cardinal tick marks */}
-              {(["11,100,21,100", "179,100,189,100", "100,11,100,21", "100,179,100,189"] as const).map((seg, i) => {
-                const [x1, y1, x2, y2] = seg.split(",").map(Number);
-                return (
-                  <line key={i} x1={x1} y1={y1} x2={x2} y2={y2}
-                    stroke={isVideoRecording && captureReadiness === "green" ? "rgba(34,211,238,0.30)" : "rgba(255,255,255,0.18)"}
-                    strokeWidth="1.5" strokeLinecap="round"
-                  />
-                );
-              })}
-              {/* Centre dot — pulses cyan when recording + aligned */}
+      {/* ── Starlink HUD: central reticle + progress ring + % ── */}
+      {!NO_SCANNER_OVERLAYS && STARLINK_DOT_CLOUD_MODE && cameraState === "readyPhase" ? (
+        <div className="pointer-events-none absolute left-1/2 top-1/2 z-[70] -translate-x-1/2 -translate-y-1/2">
+          <div className="relative" style={{ width: hudSizePx, height: hudSizePx }}>
+            <svg className="absolute inset-0 h-full w-full" viewBox="0 0 140 140" aria-hidden>
+              <circle cx="70" cy="70" r="48" stroke="rgba(255,255,255,0.10)" strokeWidth="3" fill="none" />
               <circle
-                cx="100" cy="100" r="2.5"
-                fill={isVideoRecording && captureReadiness === "green" ? "rgba(34,211,238,0.75)" : "rgba(255,255,255,0.25)"}
-                style={isVideoRecording && captureReadiness === "green"
-                  ? { filter: "drop-shadow(0 0 5px rgba(34,211,238,0.70))" }
-                  : undefined}
+                cx="70"
+                cy="70"
+                r="48"
+                stroke="rgba(34,211,238,0.90)"
+                strokeWidth="3.4"
+                strokeLinecap="round"
+                fill="none"
+                strokeDasharray={`${2 * Math.PI * 48}`}
+                strokeDashoffset={`${2 * Math.PI * 48 * (1 - Math.max(0, Math.min(1, dotCloudProgressPct / 100)))}`}
+                transform="rotate(-90 70 70)"
+                style={{
+                  filter: "drop-shadow(0 0 10px rgba(34,211,238,0.35))",
+                  transition: "stroke-dashoffset 120ms linear",
+                }}
               />
+              <circle cx="70" cy="70" r="28" stroke="rgba(255,255,255,0.08)" strokeWidth="1.5" fill="none" />
+              <circle cx="70" cy="70" r="2.2" fill="rgba(255,255,255,0.18)" />
             </svg>
-
-            {/* Recording status — shown inside ring bottom */}
-            <div className="absolute left-1/2 top-[66%] -translate-x-1/2">
-              <AnimatePresence mode="wait">
-                {stabilityPct > 0 && !isVideoRecording ? (
-                  <motion.div
-                    key="countdown"
-                    initial={{ opacity: 0, scale: 0.92 }}
-                    animate={{ opacity: 1, scale: 1 }}
-                    exit={{ opacity: 0 }}
-                    transition={{ duration: 0.2 }}
-                    className="rounded-full border border-cyan-400/25 bg-black/25 px-2.5 py-0.5 text-[9px] font-semibold tracking-[0.16em] text-cyan-300/80 backdrop-blur-sm"
-                  >
-                    {Math.ceil(2 - (stabilityPct / 100) * 2)}s
-                  </motion.div>
-                ) : isVideoRecording ? (
-                  <motion.div
-                    key="rec"
-                    initial={{ opacity: 0 }}
-                    animate={{ opacity: 1 }}
-                    exit={{ opacity: 0 }}
-                    transition={{ duration: 0.2 }}
-                    className="flex items-center gap-1 rounded-full border border-cyan-400/20 bg-black/25 px-2.5 py-0.5 backdrop-blur-sm"
-                  >
-                    <span className="h-1.5 w-1.5 rounded-full bg-cyan-400/80" style={{ animation: "neumaOrbBeat 1s ease-in-out infinite" }} />
-                    <span className="text-[9px] font-semibold tracking-[0.16em] text-cyan-300/75">REC</span>
-                  </motion.div>
-                ) : null}
-              </AnimatePresence>
+            <div className="absolute inset-0 flex flex-col items-center justify-center">
+              <div className="font-semibold tracking-tight text-white" style={{ fontSize: Math.max(22, Math.round(hudSizePx * 0.18)) }}>
+                {dotCloudProgressPct}%
+              </div>
+              <div className="mt-1 text-[10px] font-medium tracking-[0.22em] text-white/45 uppercase">Pulizia cupola</div>
             </div>
-          </div>
-
-          {/* Sub-ring text: distance warning or nudge */}
-          <div className="mt-1 h-7 flex items-center justify-center">
-            <AnimatePresence mode="wait">
-              {sheetDistanceWarning ? (
-                <motion.div
-                  key={sheetDistanceWarning}
-                  initial={{ opacity: 0, y: 4 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0 }}
-                  transition={{ duration: 0.25 }}
-                >
-                  <div
-                    className="rounded-full border border-white/[0.08] bg-white/[0.03] px-3 py-0.5 text-[11px] font-medium backdrop-blur-2xl"
-                    style={{ color: sheetDistanceWarning === "too_close" ? "rgba(252,165,165,0.88)" : "rgba(253,224,71,0.82)" }}
-                  >
-                    {sheetDistanceWarning === "too_close" ? "Allontanati" : "Avvicinati"}
-                  </div>
-                </motion.div>
-              ) : beginnerNudgeActive ? (
-                <motion.div
-                  key="nudge"
-                  initial={{ opacity: 0, y: 4 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0 }}
-                  transition={{ duration: 0.25 }}
-                >
-                  <div className="rounded-full border border-white/[0.08] bg-white/[0.03] px-3 py-0.5 text-[11px] font-medium text-white/42 backdrop-blur-2xl">
-                    Continua a girare lentamente
-                  </div>
-                </motion.div>
-              ) : null}
-            </AnimatePresence>
           </div>
         </div>
       ) : null}
 
-      {/* Motion blur nudge — minimal, non-blocking */}
-      {!NO_SCANNER_OVERLAYS && cameraState === "readyPhase" && showMotionBlurWarning ? (
+      {/* Motion blur nudge — hide for Starlink mode (pure experience) */}
+      {!NO_SCANNER_OVERLAYS && !STARLINK_DOT_CLOUD_MODE && cameraState === "readyPhase" && showMotionBlurWarning ? (
         <div className="pointer-events-none absolute bottom-[12%] left-1/2 z-[70] -translate-x-1/2 px-5">
           <div className="rounded-full border border-amber-300/12 bg-white/[0.03] px-4 py-1.5 text-[12px] font-medium text-amber-100/60 backdrop-blur-2xl">
             Rallenta leggermente
@@ -3625,83 +4656,9 @@ export default function ScannerCattura() {
         )}
       </AnimatePresence>
 
-      {/* ── Floating instruction — real-time, Apple-style ── */}
-      {scanOverlayEnabled ? (() => {
-        // Compute a single instruction key + content in priority order.
-        type PillColor = "cyan" | "emerald" | "amber" | "rose" | "neutral";
-        type Pill = { key: string; text: string; icon?: "check" | "rec" | null; color: PillColor };
-        const pill: Pill = (() => {
-          if (footScanCoverageComplete)
-            return { key: "done", text: "Ottimo — elaborazione in corso", icon: "check", color: "cyan" };
-          if (stabilityPct > 0 && !isVideoRecording)
-            return { key: "stable", text: "Tieni fermo, ci siamo quasi…", color: "cyan" };
-          if (isVideoRecording && captureReadiness === "green")
-            return { key: "rec_ok", text: "Continua a ruotare lentamente", icon: "rec", color: "cyan" };
-          if (sheetDistanceWarning === "too_close")
-            return { key: "too_close", text: "Allontanati", color: "rose" };
-          if (sheetDistanceWarning === "too_far")
-            return { key: "too_far", text: "Avvicinati al foglio", color: "amber" };
-          if (sheetDetectionState === "green" && footDetected && captureReadiness === "green")
-            return { key: "scan_ok", text: "Perfetto — ruota piano", color: "emerald" };
-          if (sheetDetectionState === "green" && footDetected)
-            return { key: "scanning", text: "Gira lentamente intorno al piede", color: "neutral" };
-          if (sheetDetectionState === "green" && !footDetected)
-            return { key: "no_foot", text: "Posiziona il piede sul foglio", color: "neutral" };
-          if (sheetDetectionState === "yellow")
-            return { key: "yellow", text: "Quasi a posto…", color: "amber" };
-          return { key: "align", text: "Inquadra il foglio A4", color: "neutral" };
-        })();
+      {/* UI reset: no legacy warnings/pills in Starlink mode */}
 
-        const borderColor: Record<PillColor, string> = {
-          cyan:    "border-cyan-400/22",
-          emerald: "border-emerald-400/18",
-          amber:   "border-amber-300/18",
-          rose:    "border-rose-400/18",
-          neutral: "border-white/[0.07]",
-        };
-        const textColor: Record<PillColor, string> = {
-          cyan:    "text-cyan-100",
-          emerald: "text-emerald-100",
-          amber:   "text-amber-100/85",
-          rose:    "text-rose-200/85",
-          neutral: "text-white/62",
-        };
-
-        return (
-          <div
-            className="pointer-events-none absolute left-1/2 top-0 z-[95] flex w-full -translate-x-1/2 justify-center px-5 pt-[max(1rem,env(safe-area-inset-top))]"
-            aria-live="polite"
-          >
-            <AnimatePresence mode="wait">
-              <motion.div
-                key={pill.key}
-                initial={{ opacity: 0, y: -6, scale: 0.97 }}
-                animate={{ opacity: 1, y: 0, scale: 1 }}
-                exit={{ opacity: 0, y: -4 }}
-                transition={{ duration: 0.28, ease: "easeOut" }}
-              >
-                <div className={`flex items-center gap-2 rounded-full border ${borderColor[pill.color]} bg-white/[0.03] px-4 py-2 backdrop-blur-2xl`}>
-                  {pill.icon === "check" && (
-                    <svg width="13" height="13" viewBox="0 0 13 13" fill="none" aria-hidden>
-                      <path d="M1.5 7L5 10.5L11.5 3" stroke="rgba(34,211,238,0.90)" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" />
-                    </svg>
-                  )}
-                  {pill.icon === "rec" && (
-                    <span
-                      className="h-1.5 w-1.5 rounded-full bg-cyan-400/80 flex-shrink-0"
-                      style={{ animation: "neumaOrbBeat 1.1s ease-in-out infinite" }}
-                      aria-hidden
-                    />
-                  )}
-                  <span className={`text-[13px] font-medium ${textColor[pill.color]}`}>{pill.text}</span>
-                </div>
-              </motion.div>
-            </AnimatePresence>
-          </div>
-        );
-      })() : null}
-
-      {scanOverlayEnabled ? (
+      {scanOverlayEnabled && !STARLINK_DOT_CLOUD_MODE ? (
         <div
           className="pointer-events-none absolute inset-0 z-[14] transition-[background,box-shadow] duration-150 ease-out motion-reduce:transition-none"
           style={{
@@ -3721,7 +4678,7 @@ export default function ScannerCattura() {
         />
       ) : null}
 
-      {scanOverlayEnabled ? (
+      {scanOverlayEnabled && !STARLINK_DOT_CLOUD_MODE ? (
         <ScannerSheetOverlayCanvas
           videoRef={videoRef}
           containerRef={videoContainerRef}
@@ -3734,12 +4691,11 @@ export default function ScannerCattura() {
       ) : null}
 
       {scanOverlayEnabled ? (
-        <ArucoMarkerPins
+        <ArucoMarkerBracketsCanvas
           videoRef={videoRef}
           containerRef={videoContainerRef}
-          markerQuadsNorm={alignment.arucoMarkerQuadsNorm}
+          markerQuadsNorm={STARLINK_DOT_CLOUD_MODE ? (openCvAruco.snapshot.quadsNorm as any) : alignment.arucoMarkerQuadsNorm}
           visible={scanOverlayEnabled}
-          locked={sheetReadyForCapture}
         />
       ) : null}
 
@@ -3789,7 +4745,7 @@ export default function ScannerCattura() {
         className="absolute inset-0 z-50"
       >
         {/* Bottom movement hint — only when actively guiding direction */}
-        {cameraState === "readyPhase" && scanMovementGuidance?.text && !footScanCoverageComplete ? (
+        {cameraState === "readyPhase" && !STARLINK_DOT_CLOUD_MODE && scanMovementGuidance?.text && !footScanCoverageComplete ? (
           <div className="pointer-events-none absolute bottom-[4.5rem] left-1/2 z-[58] -translate-x-1/2 px-5 sm:bottom-[5.2rem]">
             <AnimatePresence mode="wait">
               <motion.div
@@ -3809,7 +4765,7 @@ export default function ScannerCattura() {
 
         {/* phase content */}
         <AnimatePresence mode="wait">
-          {cameraState === "betweenFeet" && (
+          {!ZERO_TOUCH_SCANNER && cameraState === "betweenFeet" && (
             <motion.div
               key="betweenFeet"
               initial={{ opacity: 0, y: 16 }}
@@ -3863,7 +4819,7 @@ export default function ScannerCattura() {
             </motion.div>
           )}
 
-          {cameraState === "idle" && (
+          {!ZERO_TOUCH_SCANNER && cameraState === "idle" && (
             <motion.div
               key="choose-foot"
               initial={{ opacity: 0, y: 10 }}
@@ -3930,7 +4886,7 @@ export default function ScannerCattura() {
         )}
 
         {/* error overlay */}
-        {cameraState === "error" && (
+        {!ZERO_TOUCH_SCANNER && cameraState === "error" && (
           <div className="absolute inset-x-0 bottom-0 z-60 flex justify-center px-5 pb-[max(2rem,env(safe-area-inset-bottom))]">
             <div className="w-full max-w-sm rounded-3xl border border-white/10 bg-white/[0.03] px-5 py-6 text-center backdrop-blur-2xl">
               <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-rose-400/80">
@@ -4165,22 +5121,24 @@ export default function ScannerCattura() {
                           <div className="pointer-events-none absolute inset-0 bg-gradient-to-b from-black/35 via-transparent to-black/55" />
                         </motion.div>
 
-                        <div className="mt-5">
-                          <Button
-                            type="button"
-                            size="lg"
-                            className="neuma-touch w-full rounded-full py-6 text-base font-semibold shadow-[0_26px_90px_rgba(0,0,0,0.7)]"
-                            onClick={() => {
-                              if (typeof window !== "undefined") {
-                                window.dispatchEvent(
-                                  new CustomEvent("neuma:scan-proceed", { detail: { scanId: scanId || undefined } })
-                                );
-                              }
-                            }}
-                          >
-                            Continua
-                          </Button>
-                        </div>
+                        {!ZERO_TOUCH_SCANNER ? (
+                          <div className="mt-5">
+                            <Button
+                              type="button"
+                              size="lg"
+                              className="neuma-touch w-full rounded-full py-6 text-base font-semibold shadow-[0_26px_90px_rgba(0,0,0,0.7)]"
+                              onClick={() => {
+                                if (typeof window !== "undefined") {
+                                  window.dispatchEvent(
+                                    new CustomEvent("neuma:scan-proceed", { detail: { scanId: scanId || undefined } })
+                                  );
+                                }
+                              }}
+                            >
+                              Continua
+                            </Button>
+                          </div>
+                        ) : null}
                       </div>
                     );
                   case "error":

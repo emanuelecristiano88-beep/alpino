@@ -4,17 +4,66 @@
  */
 
 import type { ArucoMarkerDetection } from "./a4MarkerGeometry";
+// Force an explicit WASM URL (absolute) so bundlers/devices don't guess wrong paths.
+// Vite will emit this into /assets/… and serve it with correct MIME.
+// eslint-disable-next-line import/no-unresolved
+import arucoWasmUrl from "@ar-js-org/aruco-rs/aruco_rs_bg.wasm?url";
 
 /** Allinea al PDF guida stampa NEUMA: marker stampati DICT_4X4_50 (ID 0–3). */
 export const ARUCO_DICTIONARY_NAME = "DICT_4X4_50";
+// Brute force: try multiple 4x4 dictionaries (common OpenCV ArUco sets) + legacy fallbacks.
+const BRUTEFORCE_4X4_DICTIONARIES = ["DICT_4X4_50", "DICT_4X4_100", "DICT_4X4_250", "DICT_4X4_1000"] as const;
 const FALLBACK_DICTIONARIES = ["ARUCO", "DICT_6X6_250"] as const;
-const ALL_DICTIONARIES = [ARUCO_DICTIONARY_NAME, ...FALLBACK_DICTIONARIES] as const;
+export const ALL_DICTIONARIES = [...BRUTEFORCE_4X4_DICTIONARIES, ...FALLBACK_DICTIONARIES] as const;
 
 const MAX_HAMMING = 2;
 
 let detector: import("@ar-js-org/aruco-rs").ARucoDetector | null = null;
 let initPromise: Promise<void> | null = null;
 const detectorByDictionary = new Map<string, import("@ar-js-org/aruco-rs").ARucoDetector>();
+let lastInitError: string | null = null;
+let lastInitWasmUrl: string | null = null;
+
+function supportsWasmSimd(): boolean {
+  try {
+    // Minimal SIMD module (v128.const). If validation fails, SIMD isn't supported.
+    // eslint-disable-next-line no-new
+    const bytes = new Uint8Array([
+      0x00, 0x61, 0x73, 0x6d, // \0asm
+      0x01, 0x00, 0x00, 0x00, // version
+      0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7b, // type: () -> v128
+      0x03, 0x02, 0x01, 0x00, // func section: 1 func, type 0
+      0x07, 0x07, 0x01, 0x03, 0x72, 0x75, 0x6e, 0x00, 0x00, // export "run" func 0
+      0x0a, 0x0b, 0x01, 0x09, 0x00, 0xfd, 0x00, // v128.const
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+      0x0b, // end
+    ]);
+    // @ts-expect-error WebAssembly.validate exists
+    return typeof WebAssembly !== "undefined" && typeof WebAssembly.validate === "function" && WebAssembly.validate(bytes);
+  } catch {
+    return false;
+  }
+}
+
+export function getArucoInitError(): string | null {
+  return lastInitError;
+}
+
+export function getArucoWasmUrl(): string | null {
+  return lastInitWasmUrl;
+}
+
+function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  let t: number | null = null;
+  const timeout = new Promise<T>((_, rej) => {
+    t = window.setTimeout(() => {
+      rej(new Error(`${label} timeout after ${ms}ms`));
+    }, ms);
+  });
+  return Promise.race([p, timeout]).finally(() => {
+    if (t) window.clearTimeout(t);
+  });
+}
 
 function detectWith(det: import("@ar-js-org/aruco-rs").ARucoDetector, width: number, height: number, rgba: Uint8Array) {
   try {
@@ -259,8 +308,26 @@ export async function ensureArucoDetector(): Promise<import("@ar-js-org/aruco-rs
   if (detector) return detector;
   if (!initPromise) {
     initPromise = (async () => {
+      lastInitError = null;
+      lastInitWasmUrl = arucoWasmUrl || null;
+      // Universal compatibility: try to init even without SIMD (some builds may still work).
+      // If it fails, we surface a friendly error via `lastInitError`.
       const mod = await import("@ar-js-org/aruco-rs");
-      await mod.default();
+      // wasm-bindgen init can accept either a URL/module OR an options object with locateFile.
+      // We try locateFile first to force the absolute URL, then fall back to passing the URL directly.
+      await withTimeout(
+        (async () => {
+          try {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            await (mod.default as any)({ locateFile: () => arucoWasmUrl });
+          } catch {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            await (mod.default as any)(arucoWasmUrl);
+          }
+        })(),
+        5000,
+        "aruco-rs WASM init"
+      );
       for (const dict of ALL_DICTIONARIES) {
         try {
           const next = new mod.ARucoDetector(dict, MAX_HAMMING);
@@ -275,6 +342,18 @@ export async function ensureArucoDetector(): Promise<import("@ar-js-org/aruco-rs
       }
     })().catch((e: unknown) => {
       initPromise = null;
+      const simdNote = supportsWasmSimd() ? "" : " (nota: il browser potrebbe non supportare WASM SIMD)";
+      lastInitError =
+        (e instanceof Error ? e.message : String(e)) +
+        simdNote +
+        (lastInitWasmUrl ? ` | wasmUrl=${lastInitWasmUrl}` : "");
+      // Verbose console error for Redmi debugging: path, MIME, 404, CSP, etc.
+      // eslint-disable-next-line no-console
+      console.error("[arucoWasm] init failed", {
+        error: e,
+        wasmUrl: lastInitWasmUrl,
+        simd: supportsWasmSimd(),
+      });
       throw e instanceof Error ? e : new Error(String(e));
     });
   }
@@ -295,15 +374,52 @@ export function detectArucoOnImageData(imageData: ImageData): ArucoMarkerDetecti
   const { width, height, data } = imageData;
   const rgba = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
   const variants = buildEnhancedRgbaVariants(imageData);
-  for (const d of detectorByDictionary.values()) {
-    const base = detectWith(d, width, height, rgba);
-    if (base.length > 0) return base;
+  // Dictionary lock: prefer the exact printed dict first (DICT_4X4_50).
+  const primary = detectorByDictionary.get(ARUCO_DICTIONARY_NAME);
+  const dicts = primary ? [primary] : Array.from(detectorByDictionary.values());
+  for (const d of dicts) {
+    // Try enhanced/thresholded variants first; they are often better under reflections.
     for (const v of variants) {
       const hit = detectWith(d, width, height, v);
       if (hit.length > 0) return hit;
     }
+    const base = detectWith(d, width, height, rgba);
+    if (base.length > 0) return base;
   }
   return [];
+}
+
+/**
+ * Fast-path detector: no enhanced variants, no masking.
+ * Use when the caller already provides a high-contrast / thresholded buffer (e.g. B/W analysis canvas).
+ */
+export function detectArucoOnImageDataFast(imageData: ImageData): ArucoMarkerDetection[] {
+  if (detectorByDictionary.size === 0) return [];
+  const { width, height, data } = imageData;
+  const rgba = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+  const primary = detectorByDictionary.get(ARUCO_DICTIONARY_NAME);
+  if (primary) return detectWith(primary, width, height, rgba);
+  for (const d of detectorByDictionary.values()) {
+    const hit = detectWith(d, width, height, rgba);
+    if (hit.length > 0) return hit;
+  }
+  return [];
+}
+
+export function detectArucoOnImageDataFastBruteforce(
+  imageData: ImageData,
+  dictionaries: readonly string[] = ALL_DICTIONARIES
+): { dictionary: string; detections: ArucoMarkerDetection[] } | null {
+  if (detectorByDictionary.size === 0) return null;
+  const { width, height, data } = imageData;
+  const rgba = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+  for (const dict of dictionaries) {
+    const det = detectorByDictionary.get(dict);
+    if (!det) continue;
+    const hit = detectWith(det, width, height, rgba);
+    if (hit.length > 0) return { dictionary: dict, detections: hit };
+  }
+  return null;
 }
 
 async function getDetectorForDictionary(dictionaryName: string): Promise<import("@ar-js-org/aruco-rs").ARucoDetector | null> {
