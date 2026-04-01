@@ -32,6 +32,7 @@ import {
   type CameraPose,
   type CameraIntrinsics,
 } from "@/lib/aruco/poseEstimation";
+import { A4_SHEET_DIMS_MM } from "@/lib/aruco/sheetDimensions";
 
 // ─── Visual constants ─────────────────────────────────────────────────────────
 
@@ -84,6 +85,22 @@ const BRIGHTNESS_LOW = 60;
 const GUIDANCE_HOLD_MS = 1100;
 /** Interval between brightness samples (ms) — sampling is expensive. */
 const BRIGHTNESS_SAMPLE_INTERVAL = 2500;
+
+// ─── A4 bounding-box constants ────────────────────────────────────────────────
+
+/**
+ * Pixel margin: dome dots projected this far OUTSIDE the A4 quad are clipped.
+ * A small margin (12 px) prevents hard edge-pop when a dot barely crosses the
+ * sheet boundary.
+ */
+const A4_CLIP_MARGIN_PX = 12;
+
+/**
+ * Camera lateral offset (metres from sheet centre, XZ plane) that triggers
+ * the amber border warning.  At 0.18 m the outermost marker is approaching
+ * the frame edge — time to nudge the user to re-centre.
+ */
+const LATERAL_WARN_DIST_M = 0.18;
 
 // ─── Math helpers ─────────────────────────────────────────────────────────────
 
@@ -413,6 +430,42 @@ function drawMirino(
   ctx.restore();
 }
 
+// ─── A4 bounding-quad helpers ─────────────────────────────────────────────────
+
+/**
+ * Sort 4 screen-space points into clockwise visual order (screen Y-down)
+ * using atan2 from the centroid.  Result is stable for any convex quad.
+ */
+function sortQuadCW(pts: [number, number][]): [number, number][] {
+  const cx = pts.reduce((s, p) => s + p[0], 0) / pts.length;
+  const cy = pts.reduce((s, p) => s + p[1], 0) / pts.length;
+  return [...pts].sort(
+    (a, b) => Math.atan2(a[1] - cy, a[0] - cx) - Math.atan2(b[1] - cy, b[0] - cx),
+  );
+}
+
+/**
+ * Test whether screen point (px, py) lies inside a convex quad whose
+ * vertices are in CW order in screen-Y-down space.
+ *
+ * CW winding (screen Y-down):  inside ↔ cross-product of each edge vector
+ * with the point vector is ≥ −margin  (positive = left / inside side).
+ *
+ * margin > 0 extends the quad outward so points near the border are accepted.
+ */
+function inQuadCW(
+  px: number, py: number,
+  s: [number, number][],
+  margin = 0,
+): boolean {
+  for (let i = 0; i < 4; i++) {
+    const [ax, ay] = s[i];
+    const [bx, by] = s[(i + 1) % 4];
+    if ((bx - ax) * (py - ay) - (by - ay) * (px - ax) < -margin) return false;
+  }
+  return true;
+}
+
 // ─── Debug box draw helper ────────────────────────────────────────────────────
 
 function drawDebugBox(
@@ -424,6 +477,8 @@ function drawDebugBox(
   /** "● LIVE" | "◐ GHOST" | "○ LOST" */
   trackingLabel: string,
   consumed: number,
+  /** Current scale from pose: pixels per mm (null when tracking lost). */
+  pixPerMm: number | null,
 ) {
   const PAD   = 10;
   const FONT  = "12px ui-monospace, monospace";
@@ -437,6 +492,7 @@ function drawDebugBox(
     `MARKERS: ${markerCount}`,
     `TRACKING: ${trackingLabel}`,
     `SCANNED: ${consumed}/150`,
+    pixPerMm !== null ? `SCALE: ${pixPerMm.toFixed(2)} px/mm` : `SCALE: —`,
   ];
 
   const maxW  = Math.max(...lines.map((l) => ctx.measureText(l).width));
@@ -610,6 +666,44 @@ export function FootEraserCanvas({
             smoothedPoseRef.current = { R: orthonormalize(blendedR), t: blendedT };
           }
         }
+      }
+
+      // ── 2b. A4 bounding quad, scale lock, lateral offset ─────────────────
+      //
+      // Project the 4 physical A4 corners (GF_A4_CORNERS) using the current
+      // smoothed pose to obtain the screen-space clip quad.  This quad is used:
+      //   • as a hard clip region for the holographic foot (ctx.clip)
+      //   • for per-dot inQuadCW tests (dome dots outside the sheet are hidden)
+      //   • for the amber border warning
+      //
+      // Scale lock: 1 world metre = 1000 mm.  GF_A4_CORNERS span ±148.5 mm in X
+      // (= 297 mm) and ±105 mm in Z (= 210 mm).  We measure the projected pixel
+      // distance between the two top corners to derive pixels-per-mm, confirming
+      // that the homography decomposition has the correct real-world scale.
+      let sortedA4Quad: [number, number][] = [];
+      let pixPerMm: number | null = null;
+      let lateralOffset = 0;
+
+      if (smoothedPoseRef.current) {
+        const cornersProj = GF_A4_CORNERS.map(
+          (c) => projectPoint3D(c, smoothedPoseRef.current!, K),
+        );
+        if (cornersProj.every(Boolean)) {
+          sortedA4Quad = sortQuadCW(cornersProj as [number, number][]);
+
+          // Scale: pixel distance between TL (index 0) and TR (index 1) corners
+          // divided by the 297 mm physical long side.
+          const [tl, tr] = [cornersProj[0]!, cornersProj[1]!];
+          const pxDist = Math.sqrt((tr[0] - tl[0]) ** 2 + (tr[1] - tl[1]) ** 2);
+          pixPerMm = pxDist / A4_SHEET_DIMS_MM.widthMm; // pixels per mm
+        }
+
+        // Lateral distance of the camera from the A4 sheet centre (XZ plane only).
+        const cp = computeCameraWorldPos(
+          smoothedPoseRef.current.R,
+          smoothedPoseRef.current.t,
+        );
+        lateralOffset = Math.sqrt(cp[0] ** 2 + cp[2] ** 2);
       }
 
       // ── 3. Project dome points using smoothed (or ghost) pose ─────────────
@@ -798,9 +892,24 @@ export function FootEraserCanvas({
         (p) => now - p.diedAt < DYING_MS,
       );
 
-      // ── 5. Holographic foot reference — rendered before dome dots ─────────
+      // ── 5. Holographic foot — hard-clipped to projected A4 bounding quad ────
+      //
+      // ctx.clip() creates a clipping region from the projected A4 quad so that
+      // no hologram element (grid, glass prism, point cloud, corner brackets)
+      // spills outside the physical sheet boundary.
       if (trackingOk && smoothedPoseRef.current) {
-        drawHolographicFoot(ctx, smoothedPoseRef.current, K, now);
+        if (sortedA4Quad.length === 4) {
+          ctx.save();
+          ctx.beginPath();
+          ctx.moveTo(sortedA4Quad[0][0], sortedA4Quad[0][1]);
+          for (let i = 1; i < 4; i++) ctx.lineTo(sortedA4Quad[i][0], sortedA4Quad[i][1]);
+          ctx.closePath();
+          ctx.clip();
+          drawHolographicFoot(ctx, smoothedPoseRef.current, K, now);
+          ctx.restore();
+        } else {
+          drawHolographicFoot(ctx, smoothedPoseRef.current, K, now);
+        }
       }
 
       // ── 6. Draw outer scanning ring (faint amber) ─────────────────────────
@@ -815,16 +924,24 @@ export function FootEraserCanvas({
         ctx.restore();
       }
 
-      // ── 7. Idle dots — white translucent ─────────────────────────────────
+      // ── 7. Idle dots — white translucent, hard-clipped to A4 quad ──────────
       ctx.fillStyle = C_IDLE;
       for (const dot of idleDots) {
+        if (
+          sortedA4Quad.length === 4 &&
+          !inQuadCW(dot.sx, dot.sy, sortedA4Quad, A4_CLIP_MARGIN_PX)
+        ) continue;
         ctx.beginPath();
         ctx.arc(dot.sx, dot.sy, DOT_R_IDLE, 0, Math.PI * 2);
         ctx.fill();
       }
 
-      // ── 8. Scanning dots — amber + glow ──────────────────────────────────
+      // ── 8. Scanning dots — amber + glow, hard-clipped to A4 quad ─────────
       for (const dot of scanDots) {
+        if (
+          sortedA4Quad.length === 4 &&
+          !inQuadCW(dot.sx, dot.sy, sortedA4Quad, A4_CLIP_MARGIN_PX)
+        ) continue;
         ctx.beginPath();
         ctx.arc(dot.sx, dot.sy, DOT_R_SCAN + 5, 0, Math.PI * 2);
         ctx.fillStyle = C_SCAN_GLOW;
@@ -846,6 +963,8 @@ export function FootEraserCanvas({
       // Opacity uses t³ (cubic ease-out): fades quickly at first, nearly
       // invisible well before the scale reaches zero — the point "evaporates".
       for (const p of animatingPointsRef.current) {
+        // Animating points are always allowed to finish their death animation
+        // even if they were just outside the quad when erased.
         // progress: 0 (just consumed) → 1 (animation complete)
         const progress = Math.min(1, (now - p.diedAt) / DYING_MS);
         // t: 1 → 0 (remaining life fraction)
@@ -864,6 +983,53 @@ export function FootEraserCanvas({
         ctx.arc(p.sx, p.sy, scaledR, 0, Math.PI * 2);
         ctx.fillStyle = C_DYING;
         ctx.fill();
+        ctx.restore();
+      }
+
+      // ── 9b. Amber border warning — pulsing when camera drifts laterally ───
+      //
+      // When the camera's horizontal distance from the A4 centre exceeds
+      // LATERAL_WARN_DIST_M (0.18 m) the outermost ArUco marker is approaching
+      // the frame edge.  A pulsing amber outline on the projected A4 quad nudges
+      // Emanuele to re-centre before markers go out of view.
+      //
+      // Additionally, if any projected corner is within 8 % of the screen edge,
+      // the same warning fires regardless of lateral offset.
+      const edgeMargin = Math.min(w, h) * 0.08;
+      const cornerNearEdge =
+        sortedA4Quad.length === 4 &&
+        sortedA4Quad.some(
+          ([px, py]) =>
+            px < edgeMargin || px > w - edgeMargin ||
+            py < edgeMargin || py > h - edgeMargin,
+        );
+      const showBorderWarn =
+        trackingOk &&
+        sortedA4Quad.length === 4 &&
+        (lateralOffset > LATERAL_WARN_DIST_M || cornerNearEdge);
+
+      if (showBorderWarn) {
+        // Intensity ramps from 0 → 1 as the offset exceeds the threshold.
+        const warnProgress = cornerNearEdge
+          ? 1
+          : Math.min(1, (lateralOffset - LATERAL_WARN_DIST_M) / 0.07);
+        // Fast 700 ms pulse (Apple amber warning rhythm)
+        const warnT     = (now / 700) % 1;
+        const warnPulse = 0.28 + 0.55 * (0.5 - 0.5 * Math.cos(warnT * Math.PI * 2));
+        const warnAlpha = warnPulse * warnProgress;
+
+        ctx.save();
+        ctx.globalAlpha  = warnAlpha;
+        ctx.strokeStyle  = "rgba(251, 191, 36, 1)"; // Apple amber
+        ctx.lineWidth    = 2.5;
+        ctx.lineCap      = "round";
+        ctx.lineJoin     = "round";
+        ctx.setLineDash([]);
+        ctx.beginPath();
+        ctx.moveTo(sortedA4Quad[0][0], sortedA4Quad[0][1]);
+        for (let i = 1; i < 4; i++) ctx.lineTo(sortedA4Quad[i][0], sortedA4Quad[i][1]);
+        ctx.closePath();
+        ctx.stroke();
         ctx.restore();
       }
 
@@ -890,6 +1056,7 @@ export function FootEraserCanvas({
         quads.length,
         trackingLabel,
         eraser.totalConsumed,
+        pixPerMm,
       );
 
       rafRef.current = requestAnimationFrame(draw);
