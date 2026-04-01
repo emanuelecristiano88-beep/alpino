@@ -53,8 +53,14 @@
           window.__opencv_boot.wasmLoaded = true;
           console.log("NEUMA: OpenCV Pronto!");
           var cv = window.cv;
-          if (cv && !cv.aruco) {
+          if (!cv) return;
+          console.log("cv.aruco:", !!cv.aruco);
+          if (!cv.aruco) {
             console.log("ERRORE: Modulo ArUco non presente nel file JS (rilevamento via js-aruco2)");
+            try {
+              var methods = Object.keys(cv).filter(function(k) { return typeof cv[k] === "function" || typeof cv[k] === "object"; });
+              console.log("cv primi 20 metodi/oggetti:", methods.slice(0, 20).join(", "));
+            } catch (e) { console.log("cv dump error:", e); }
           }
         },
       };
@@ -62,6 +68,7 @@
     <script
       src="/opencv.js"
       async
+      crossorigin="anonymous"
       id="opencv-script"
       onload="window.__opencv_boot.jsLoaded=true"
       onerror="window.__opencv_boot.errors.push('JS load error: /opencv.js')"

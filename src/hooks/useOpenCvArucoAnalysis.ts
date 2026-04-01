@@ -126,15 +126,27 @@ export function useOpenCvArucoAnalysis(videoRef: React.RefObject<HTMLVideoElemen
       fpsRef.current.lastAt = now;
       fpsRef.current.fps = dt > 0 ? Math.max(0, Math.min(999, 1000 / dt)) : 0;
 
-      // Periodic console log.
+      // Periodic console log (~1Hz).
       if (now - lastLogAtRef.current > 1000) {
         lastLogAtRef.current = now;
+        const cvWin = (window as any).cv;
         // eslint-disable-next-line no-console
         console.log(
           "AR.Detector:", !!detectorRef.current,
-          "fps:", fpsRef.current.fps.toFixed(1),
-          "video:", video.videoWidth + "x" + video.videoHeight,
+          "| cvReady:", !!(window as any).cvReady,
+          "| cv.aruco:", !!cvWin?.aruco,
+          "| fps:", fpsRef.current.fps.toFixed(1),
+          "| video:", video.videoWidth + "x" + video.videoHeight,
         );
+        // Debug dump: print first 20 cv keys if cv loaded but aruco missing.
+        if (cvWin && !cvWin.aruco) {
+          try {
+            // eslint-disable-next-line no-console
+            console.log("cv keys (no aruco):", Object.keys(cvWin).slice(0, 20).join(", "));
+          } catch {
+            // ignore
+          }
+        }
       }
 
       // Detector not yet ready: try lazy init, report loading state.
