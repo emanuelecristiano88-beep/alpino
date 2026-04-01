@@ -8,7 +8,7 @@ declare global {
   }
 }
 
-const OPENCV_LOCAL_URL = "https://docs.opencv.org/4.5.5/opencv.js";
+const OPENCV_LOCAL_URL = "/opencv.js";
 
 export function isOpenCvReady(): boolean {
   // cv exists and runtime initialized (Mat is a reliable signal)
@@ -89,7 +89,7 @@ export function loadOpenCv({
           window.clearTimeout(t);
           finishOk();
         },
-        locateFile: (path: string) => `https://docs.opencv.org/4.5.5/${path}`,
+        locateFile: (path: string) => (path.endsWith(".wasm") ? "/opencv_js.wasm" : path),
       };
     } catch {
       // ignore
