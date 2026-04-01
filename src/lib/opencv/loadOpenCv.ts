@@ -89,7 +89,7 @@ export function loadOpenCv({
           window.clearTimeout(t);
           finishOk();
         },
-        locateFile: (path: string) => (path.endsWith(".wasm") ? "/opencv_js.wasm" : path),
+        locateFile: (path: string) => (path.endsWith(".wasm") ? "/opencv.wasm" : path),
       };
     } catch {
       // ignore

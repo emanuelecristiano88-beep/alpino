@@ -607,30 +607,36 @@ export default function ScannerCattura() {
     };
   }, []);
 
-  // Old-school polling: OpenCV must be loaded at site start (index.html).
+  // Polling: accept OpenCV (cvReady) OR js-aruco2 (AR.Detector) as "ready".
   useEffect(() => {
     openCvBootStartedAtRef.current = performance.now();
     setOpenCvStatus("loading");
     setOpenCvError(null);
     const id = window.setInterval(() => {
       const cv = (window as any).cv;
-      const readyFlag = !!(window as any).cvReady;
-      if (cv && readyFlag && typeof cv.Mat === "function") {
+      const cvOk = cv && !!(window as any).cvReady && typeof cv.Mat === "function";
+      const arOk = !!(window as any).AR?.Detector;
+      if (cvOk || arOk) {
         setOpenCvStatus("ready");
         setOpenCvError(null);
         window.clearInterval(id);
+        // Diagnostic: log cv.aruco status when OpenCV is present.
+        if (cv && !cv.aruco) {
+          console.log("ERRORE: Modulo ArUco non presente nel file JS (rilevamento via js-aruco2)");
+        }
       }
-    }, 1000);
+    }, 500);
     const timeout = window.setTimeout(() => {
       const cv = (window as any).cv;
-      if (!cv) {
+      const arOk = !!(window as any).AR?.Detector;
+      if (!arOk && !cv) {
         setOpenCvStatus("error");
         const boot = (window as any).__opencv_boot;
         const errs = boot?.errors?.length ? String(boot.errors.slice(-3).join(" | ")) : "";
         const loaded = boot ? String(!!boot.jsLoaded) : "n/a";
         setOpenCvError(`ERRORE: window.cv non trovato nel DOM (jsLoaded=${loaded}${errs ? `; ${errs}` : ""})`);
       }
-    }, 5000);
+    }, 8000);
     return () => {
       window.clearInterval(id);
       window.clearTimeout(timeout);
@@ -1101,7 +1107,12 @@ export default function ScannerCattura() {
         lastHudAt = t;
         if (fpsEl) fpsEl.innerText = String(Math.round(snap.analysisFps ?? 0));
         if (markersEl) markersEl.innerText = String(snap.markerCount ?? 0);
-        if (wasmEl) wasmEl.innerText = STARLINK_DOT_CLOUD_MODE ? String(snap.status ?? "") : String(snap.arucoEngine ?? "");
+        if (wasmEl) {
+          const cvDone = !!(window as any).cvReady;
+          const arDone = !!(window as any).AR?.Detector;
+          const baseStatus = STARLINK_DOT_CLOUD_MODE ? String(snap.status ?? "") : String(snap.arucoEngine ?? "");
+          wasmEl.innerText = cvDone ? "READY" : arDone ? baseStatus : "loading";
+        }
         if (detectEl) detectEl.innerText = STARLINK_DOT_CLOUD_MODE ? `${Math.round(snap.detectMs ?? 0)}ms` : `${Math.round(snap.arucoDetectMs ?? 0)}ms`;
         if (errEl) errEl.innerText = STARLINK_DOT_CLOUD_MODE ? (snap.error ?? "") : (snap.arucoDetectError ?? "");
         if (dotCloudHudPctRef.current) dotCloudHudPctRef.current.innerText = `${dotCloudProgressRef.current}%`;
