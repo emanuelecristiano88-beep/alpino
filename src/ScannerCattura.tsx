@@ -4260,7 +4260,7 @@ export default function ScannerCattura() {
       {/* Apple-style WatchOS progress ring — top-right, Starlink mode only */}
       <ScannerAppleProgress
         progress={eraser.progress}
-        remaining={eraser.remaining.length}
+        remaining={eraser.remainingPoints.length}
         visible={STARLINK_DOT_CLOUD_MODE && cameraState === "readyPhase"}
       />
 

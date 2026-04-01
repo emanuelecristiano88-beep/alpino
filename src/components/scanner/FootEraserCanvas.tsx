@@ -3,23 +3,28 @@
  * live video feed.
  *
  * Drawing order each frame:
- *  1. Dashed white eraser ring at screen centre (50 px radius).
- *  2. Live hemisphere dots: small red filled circles.
- *  3. Dying/fading particles: red circles that shrink + fade in 200 ms.
- *
- * The canvas manages its own RAF loop and calls `eraser.tick()` which
- * both projects dots AND returns newly consumed ones for fade animation.
+ *  1. Outer scanning ring (90 px) — dashed amber ring, "warm-up zone".
+ *  2. Inner eraser ring  (50 px) — dashed white ring, "consume zone".
+ *  3. Idle dots     — small red filled circles.
+ *  4. Scanning dots — amber filled circles with a soft outer glow.
+ *  5. Dying particles — rose circles shrinking + fading over 200 ms.
  */
 import React, { useEffect, useRef } from "react";
 import type { ScanFrameTilt } from "@/hooks/useScanFrameOrientation";
 import type { FootEraserState } from "@/hooks/useFootEraser";
 
-// ─── Constants ────────────────────────────────────────────────────────────────
+// ─── Visual constants ─────────────────────────────────────────────────────────
 
-const ERASER_RADIUS_PX = 50;
-const DOT_RADIUS = 4;
+const DONE_RADIUS_PX   = 50;
+const SCAN_RADIUS_PX   = 90;
+const DOT_RADIUS_IDLE  = 4;
+const DOT_RADIUS_SCAN  = 5.5;
 const DYING_DURATION_MS = 200;
-const DOT_COLOR = "rgba(220, 38, 38, 0.9)"; // Tailwind red-600
+
+const COLOR_IDLE    = "rgba(220, 38, 38, 0.88)";       // red-600
+const COLOR_SCAN    = "rgba(251, 191, 36, 0.95)";       // amber-400
+const COLOR_SCAN_GLOW = "rgba(251, 191, 36, 0.25)";
+const COLOR_DYING   = "rgba(251, 113, 133, 1)";         // rose-400
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -40,8 +45,8 @@ interface Props {
 
 export function FootEraserCanvas({ eraser, tiltRef, visible }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const rafRef = useRef<number>(0);
-  const dyingRef = useRef<DyingParticle[]>([]);
+  const rafRef    = useRef<number>(0);
+  const dyingRef  = useRef<DyingParticle[]>([]);
 
   useEffect(() => {
     if (!visible) {
@@ -59,64 +64,87 @@ export function FootEraserCanvas({ eraser, tiltRef, visible }: Props) {
       const parent = canvas.parentElement;
       if (!parent) { rafRef.current = requestAnimationFrame(draw); return; }
 
-      // Keep canvas pixel-perfect to its container
       const w = parent.clientWidth;
       const h = parent.clientHeight;
       if (canvas.width !== w || canvas.height !== h) {
-        canvas.width = w;
+        canvas.width  = w;
         canvas.height = h;
       }
 
       ctx.clearRect(0, 0, w, h);
       const now = performance.now();
-      const cx = w / 2;
-      const cy = h / 2;
+      const cx  = w / 2;
+      const cy  = h / 2;
 
-      // ── 1. Run eraser tick: project dots + collect newly consumed ────────
+      // ── 1. Tick: project + detect consumption ─────────────────────────────
       const { live, consumed } = eraser.tick(tiltRef.current, w, h);
 
-      // Add freshly consumed dots to the dying queue
       for (const c of consumed) {
         dyingRef.current.push({ id: c.id, sx: c.sx, sy: c.sy, diedAt: now });
       }
-
-      // Evict expired dying particles
       dyingRef.current = dyingRef.current.filter(
         (p) => now - p.diedAt < DYING_DURATION_MS,
       );
 
-      // ── 2. Eraser ring (dashed white circle at screen centre) ─────────────
+      // ── 2. Outer scanning ring ────────────────────────────────────────────
       ctx.save();
-      ctx.setLineDash([5, 4]);
-      ctx.lineWidth = 1.5;
-      ctx.strokeStyle = "rgba(255,255,255,0.50)";
+      ctx.setLineDash([6, 5]);
+      ctx.lineWidth   = 1;
+      ctx.strokeStyle = "rgba(251, 191, 36, 0.30)"; // faint amber
       ctx.beginPath();
-      ctx.arc(cx, cy, ERASER_RADIUS_PX, 0, Math.PI * 2);
+      ctx.arc(cx, cy, SCAN_RADIUS_PX, 0, Math.PI * 2);
       ctx.stroke();
       ctx.restore();
 
-      // ── 3. Live dots ──────────────────────────────────────────────────────
-      ctx.fillStyle = DOT_COLOR;
+      // ── 3. Inner eraser ring ──────────────────────────────────────────────
+      ctx.save();
+      ctx.setLineDash([5, 4]);
+      ctx.lineWidth   = 1.5;
+      ctx.strokeStyle = "rgba(255,255,255,0.50)";
+      ctx.beginPath();
+      ctx.arc(cx, cy, DONE_RADIUS_PX, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+
+      // ── 4a. Idle dots (red) ───────────────────────────────────────────────
+      ctx.fillStyle = COLOR_IDLE;
       for (const dot of live) {
+        if (dot.status !== "idle") continue;
         ctx.beginPath();
-        ctx.arc(dot.sx, dot.sy, DOT_RADIUS, 0, Math.PI * 2);
+        ctx.arc(dot.sx, dot.sy, DOT_RADIUS_IDLE, 0, Math.PI * 2);
         ctx.fill();
       }
 
-      // ── 4. Dying particles: fade out + scale down ─────────────────────────
+      // ── 4b. Scanning dots (amber + soft glow) ────────────────────────────
+      for (const dot of live) {
+        if (dot.status !== "scanning") continue;
+
+        // Glow halo
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(dot.sx, dot.sy, DOT_RADIUS_SCAN + 5, 0, Math.PI * 2);
+        ctx.fillStyle = COLOR_SCAN_GLOW;
+        ctx.fill();
+        ctx.restore();
+
+        // Core dot
+        ctx.beginPath();
+        ctx.arc(dot.sx, dot.sy, DOT_RADIUS_SCAN, 0, Math.PI * 2);
+        ctx.fillStyle = COLOR_SCAN;
+        ctx.fill();
+      }
+
+      // ── 5. Dying particles: fade + shrink ────────────────────────────────
       for (const p of dyingRef.current) {
         const elapsed = now - p.diedAt;
-        const t = 1 - elapsed / DYING_DURATION_MS; // 1 → 0 (fresh → gone)
-        // ease-in-quad so the pop feels snappy
-        const eased = t * t;
-        const alpha = eased;
-        const scale = eased * (DOT_RADIUS + 3); // grows slightly then shrinks
+        const t       = 1 - elapsed / DYING_DURATION_MS; // 1 → 0
+        const eased   = t * t;                            // ease-in-quad
 
         ctx.save();
-        ctx.globalAlpha = alpha;
+        ctx.globalAlpha = eased;
         ctx.beginPath();
-        ctx.arc(p.sx, p.sy, scale, 0, Math.PI * 2);
-        ctx.fillStyle = "rgba(251, 113, 133, 1)"; // rose-400 — different tint on death
+        ctx.arc(p.sx, p.sy, eased * (DOT_RADIUS_IDLE + 4), 0, Math.PI * 2);
+        ctx.fillStyle = COLOR_DYING;
         ctx.fill();
         ctx.restore();
       }
