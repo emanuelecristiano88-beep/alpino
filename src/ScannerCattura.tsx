@@ -10,6 +10,8 @@ import { useScanAlignmentAnalysis } from "./hooks/useScanAlignmentAnalysis";
 import { useOpenCvArucoAnalysis } from "./hooks/useOpenCvArucoAnalysis";
 import { requestOrientationAccess } from "./hooks/useDeviceTilt";
 import { useScanFrameOrientation } from "./hooks/useScanFrameOrientation";
+import { useFootEraser } from "./hooks/useFootEraser";
+import { FootEraserCanvas } from "./components/scanner/FootEraserCanvas";
 import { useScanGuidance } from "./hooks/useScanGuidance";
 import ScannerAlignmentOverlay from "./components/scanner/ScannerAlignmentOverlay";
 import ScanDebugOverlay from "./components/scanner/ScanDebugOverlay";
@@ -564,6 +566,7 @@ export default function ScannerCattura() {
   const arcTargetDegRef = useRef(0);
   const hapticStepRef = useRef(-1);
   const [dotCloudProgressPct, setDotCloudProgressPct] = useState(0);
+  const [finalCountdown, setFinalCountdown] = useState<number | null>(null);
   const dotCloudProgressRef = useRef(0);
   const dotCloudHudPctRef = useRef<HTMLSpanElement | null>(null);
   const debugFpsElRef = useRef<HTMLSpanElement | null>(null);
@@ -1201,6 +1204,35 @@ export default function ScannerCattura() {
     })();
   }, [alignment.markerCount, cameraState, restartCamera, scanStarted]);
   const frameTilt = useScanFrameOrientation(scanOverlayEnabled);
+
+  // ── Foot Eraser (Starlink-inverted UX) ─────────────────────────────────────
+  const eraser = useFootEraser(scanOverlayEnabled && STARLINK_DOT_CLOUD_MODE);
+
+  // Keep a mutable ref so FootEraserCanvas can read the latest tilt in its own
+  // RAF loop without a stale closure and without re-rendering on every frame.
+  const frameTiltRef = useRef(frameTilt);
+  useEffect(() => {
+    frameTiltRef.current = frameTilt;
+  }, [frameTilt]);
+
+  // When all 150 eraser points are consumed → 3-second countdown → capture
+  useEffect(() => {
+    if (!eraser.isComplete || cameraState !== "readyPhase" || !STARLINK_DOT_CLOUD_MODE) return;
+    let secs = 3;
+    setFinalCountdown(secs);
+    const iv = setInterval(() => {
+      secs -= 1;
+      if (secs <= 0) {
+        clearInterval(iv);
+        setFinalCountdown(null);
+        void stopAndUploadDotCloud();
+      } else {
+        setFinalCountdown(secs);
+      }
+    }, 1000);
+    return () => clearInterval(iv);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [eraser.isComplete, cameraState]);
 
   /** Angolo istantaneo 0–360° (stesso mapping dei settori); null senza foglio o tilt debole. */
   const liveOrbitAngleDeg = useMemo(() => {
@@ -4217,6 +4249,13 @@ export default function ScannerCattura() {
         <canvas ref={debugCanvasRef} className="pointer-events-none absolute inset-0 z-[19]" aria-hidden />
       ) : null}
 
+      {/* Foot Eraser: hemisphere dots projected on video + eraser ring at centre */}
+      <FootEraserCanvas
+        eraser={eraser}
+        tiltRef={frameTiltRef}
+        visible={STARLINK_DOT_CLOUD_MODE && cameraState === "readyPhase" && !eraser.isComplete}
+      />
+
       {/* Mini debug view: analysis (B/W) buffer */}
       {cameraState === "readyPhase" && (STARLINK_DOT_CLOUD_MODE ? openCvAruco.snapshot.pipCanvas : alignment.analysisPreviewCanvas) ? (
         <div className="pointer-events-none absolute bottom-3 right-3 z-[96] overflow-hidden rounded-2xl border border-emerald-300/20 bg-black/60 backdrop-blur-2xl">
@@ -4426,6 +4465,21 @@ export default function ScannerCattura() {
               </div>
               <div className="mt-1 text-[10px] font-medium tracking-[0.22em] text-white/45 uppercase">Pulizia cupola</div>
             </div>
+          </div>
+        </div>
+      ) : null}
+
+      {/* ── Final-capture countdown (3-2-1) after all eraser points cleared ── */}
+      {STARLINK_DOT_CLOUD_MODE && finalCountdown !== null ? (
+        <div className="pointer-events-none absolute inset-0 z-[115] flex flex-col items-center justify-center gap-5 bg-black/40 backdrop-blur-sm">
+          <div
+            className="font-black text-white"
+            style={{ fontSize: "clamp(80px, 28vw, 160px)", lineHeight: 1, textShadow: "0 0 40px rgba(34,211,238,0.6)" }}
+          >
+            {finalCountdown}
+          </div>
+          <div className="text-sm font-semibold tracking-widest text-white/70 uppercase">
+            Cattura finale alta risoluzione
           </div>
         </div>
       ) : null}
