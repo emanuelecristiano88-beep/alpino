@@ -41,7 +41,7 @@
       />
     </noscript>
     <script>
-      // OpenCV "old school" boot: preload wasmBinary BEFORE loading opencv.js.
+      // OpenCV boot: load 4.5.5 from CDN — includes ArUco module + WASM from docs.opencv.org.
       window.__opencv_boot = { errors: [], jsLoaded: false, wasmLoaded: false };
 
       window.addEventListener(
@@ -70,40 +70,27 @@
       window.cvReady = false;
       window.Module = {
         locateFile: function (path) {
-          if (path && path.endsWith(".wasm")) return "/opencv_js.wasm";
-          return path;
+          return "https://docs.opencv.org/4.5.5/" + path;
         },
         onRuntimeInitialized: function () {
           window.cvReady = true;
-          console.log("OpenCV con WASM Binary: PRONTO!");
+          console.log("OpenCV 4.5.5 CDN (ArUco): PRONTO!");
         },
       };
 
-      (async function bootOpenCv() {
-        try {
-          const res = await fetch("/opencv_js.wasm", { cache: "no-store" });
-          if (!res.ok) throw new Error("WASM fetch " + res.status);
-          const buf = await res.arrayBuffer();
-          // Emscripten accepts ArrayBuffer or Uint8Array; Uint8Array is safest.
-          window.Module.wasmBinary = new Uint8Array(buf);
-          window.__opencv_boot.wasmLoaded = true;
-        } catch (e) {
-          try {
-            const msg = e && e.message ? e.message : String(e);
-            window.__opencv_boot.errors.push("WASM preload: " + msg);
-          } catch {}
-        }
-
+      (function bootOpenCv() {
         try {
           const s = document.createElement("script");
-          s.src = "/opencv.js?v=20260401";
+          s.src = "https://docs.opencv.org/4.5.5/opencv.js";
           s.type = "text/javascript";
           s.async = false;
+          s.crossOrigin = "anonymous";
           s.onload = function () {
             window.__opencv_boot.jsLoaded = true;
+            window.__opencv_boot.wasmLoaded = true;
           };
           s.onerror = function () {
-            window.__opencv_boot.errors.push("JS load error: /opencv.js");
+            window.__opencv_boot.errors.push("JS load error: opencv.js CDN 4.5.5");
           };
           document.head.appendChild(s);
         } catch (e) {

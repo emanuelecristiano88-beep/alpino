@@ -201,11 +201,9 @@ export function useOpenCvArucoAnalysis(videoRef: React.RefObject<HTMLVideoElemen
         return;
       }
 
-      // STOP THE GHOST: fatal if camera not anchored or ArUco missing.
-      if (!video.videoWidth || !video.videoHeight || !cv?.aruco) {
-        const msg = !cv?.aruco
-          ? "ERRORE: FOTOCAMERA NON AGGANCIATA O MODULO ARUCO MANCANTE (cv.aruco=false)"
-          : "ERRORE: FOTOCAMERA NON AGGANCIATA O MODULO ARUCO MANCANTE (videoWidth=0)";
+      // STOP THE GHOST: fatal only if camera dimensions are zero (hardware issue).
+      if (!video.videoWidth || !video.videoHeight) {
+        const msg = "ERRORE: FOTOCAMERA NON AGGANCIATA (videoWidth=0)";
         fatalStopRef.current = true;
         const next: OpenCvArucoSnapshot = {
           ...liveRef.current,
@@ -221,6 +219,8 @@ export function useOpenCvArucoAnalysis(videoRef: React.RefObject<HTMLVideoElemen
         setSnapshot(next);
         return;
       }
+      // ArUco not yet available: silent loading wait, will retry next frame.
+      if (!cv?.aruco) return;
 
       if (status !== "ready") {
         const next: OpenCvArucoSnapshot = {
