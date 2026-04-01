@@ -1078,7 +1078,8 @@ export default function ScannerCattura() {
   const alignmentResetKey = currentFoot === "RIGHT" ? 1 : 0;
   const alignment = useScanAlignmentAnalysis(videoRef, scanOverlayEnabled && !STARLINK_DOT_CLOUD_MODE, alignmentResetKey, currentFoot);
   /** OpenCV-based ArUco for Starlink mode. */
-  const openCvAruco = useOpenCvArucoAnalysis(videoRef, scanOverlayEnabled && openCvStatus === "ready");
+  // Keep analysis loop alive for FPS heartbeat even while OpenCV is loading.
+  const openCvAruco = useOpenCvArucoAnalysis(videoRef, scanOverlayEnabled);
 
   // Bypass React re-render: update debug HUD + draw marker boxes directly.
   useEffect(() => {

@@ -70,6 +70,7 @@ export function useOpenCvArucoAnalysis(videoRef: React.RefObject<HTMLVideoElemen
   const busyRef = useRef(false);
   const skipUntilRef = useRef(0);
   const lastPipAtRef = useRef(0);
+  const lastLogAtRef = useRef(0);
 
   const cv = (typeof window !== "undefined" ? (window as any).cv : null) as any;
 
@@ -142,7 +143,6 @@ export function useOpenCvArucoAnalysis(videoRef: React.RefObject<HTMLVideoElemen
 
   useEffect(() => {
     if (!enabled) return;
-    if (status !== "ready") return;
     let raf = 0;
     const tick = (t: number) => {
       raf = requestAnimationFrame(tick);
@@ -150,6 +150,82 @@ export function useOpenCvArucoAnalysis(videoRef: React.RefObject<HTMLVideoElemen
       if (t < skipUntilRef.current) return;
       const video = videoRef.current;
       if (!video || video.readyState < 2 || !video.videoWidth) return;
+      const now = performance.now();
+
+      // FPS heartbeat: update even while loading / missing cv.
+      const dt = fpsRef.current.lastAt > 0 ? now - fpsRef.current.lastAt : 0;
+      fpsRef.current.lastAt = now;
+      fpsRef.current.fps = dt > 0 ? Math.max(0, Math.min(999, 1000 / dt)) : 0;
+
+      if (!cv || typeof cv.Mat !== "function") {
+        if (now - lastLogAtRef.current > 1000) {
+          lastLogAtRef.current = now;
+          // eslint-disable-next-line no-console
+          console.log("Loop attivo - Status:", status);
+          // eslint-disable-next-line no-console
+          console.log("CV non trovato nel loop");
+        }
+        const next: OpenCvArucoSnapshot = {
+          ...liveRef.current,
+          status: enabled ? "loading" : "loading",
+          error: null,
+          analysisFps: fpsRef.current.fps,
+          detectMs: 0,
+          markerCount: 0,
+          idsRaw: [],
+          quadsNorm: [],
+        };
+        liveRef.current = next;
+        // Low-churn state update (heartbeat).
+        setSnapshot((prev) => (now - lastPipAtRef.current > 250 ? next : prev));
+        return;
+      }
+
+      if (status !== "ready") {
+        if (now - lastLogAtRef.current > 1000) {
+          lastLogAtRef.current = now;
+          // eslint-disable-next-line no-console
+          console.log("Loop attivo - Status:", status);
+        }
+        const next: OpenCvArucoSnapshot = {
+          ...liveRef.current,
+          status,
+          error: null,
+          analysisFps: fpsRef.current.fps,
+          detectMs: 0,
+        };
+        liveRef.current = next;
+        setSnapshot((prev) => (now - lastPipAtRef.current > 250 ? next : prev));
+        return;
+      }
+
+      // Ensure mats are initialized (and surface errors instead of failing silently).
+      if (!matsRef.current) {
+        try {
+          const rgba = new cv.Mat(480, 640, cv.CV_8UC4);
+          const gray = new cv.Mat(480, 640, cv.CV_8UC1);
+          const bw = new cv.Mat(480, 640, cv.CV_8UC1);
+          const corners = new cv.MatVector();
+          const ids = new cv.Mat();
+          const rejected = new cv.MatVector();
+          const dict = cv.aruco?.getPredefinedDictionary?.(cv.aruco.DICT_4X4_50);
+          const params = cv.aruco?.DetectorParameters ? new cv.aruco.DetectorParameters() : cv.aruco?.DetectorParameters_create?.();
+          if (!dict) throw new Error("cv.aruco.getPredefinedDictionary non disponibile");
+          if (params) {
+            if ("minMarkerDistanceRate" in params) params.minMarkerDistanceRate = 0.02;
+            if ("adaptiveThreshWinSizeStep" in params) params.adaptiveThreshWinSizeStep = 4;
+            if ("cornerRefinementMethod" in params) params.cornerRefinementMethod = cv.aruco.CORNER_REFINE_SUBPIX;
+          }
+          matsRef.current = { rgba, gray, bw, corners, ids, rejected, dict, params };
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          const next: OpenCvArucoSnapshot = { ...liveRef.current, status: "error", error: msg, analysisFps: fpsRef.current.fps, detectMs: 0 };
+          liveRef.current = next;
+          setSnapshot(next);
+          return;
+        }
+      }
+
       const m = matsRef.current;
       if (!m) return;
       const w = 640;
@@ -163,11 +239,6 @@ export function useOpenCvArucoAnalysis(videoRef: React.RefObject<HTMLVideoElemen
       const ctx = canvas.getContext("2d", { willReadFrequently: true });
       if (!ctx) return;
       busyRef.current = true;
-
-      const now = performance.now();
-      const dt = fpsRef.current.lastAt > 0 ? now - fpsRef.current.lastAt : 0;
-      fpsRef.current.lastAt = now;
-      fpsRef.current.fps = dt > 0 ? Math.max(0, Math.min(999, 1000 / dt)) : 0;
 
       try {
         drawCover(ctx, video, w, h);
