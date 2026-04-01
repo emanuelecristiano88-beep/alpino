@@ -26,8 +26,11 @@ import {
   estimateCameraIntrinsics,
   estimatePoseFromQuads,
   projectDomePoints,
+  projectPoint3D,
   computeCameraWorldPos,
   type ObservationData,
+  type CameraPose,
+  type CameraIntrinsics,
 } from "@/lib/aruco/poseEstimation";
 
 // ─── Visual constants ─────────────────────────────────────────────────────────
@@ -123,6 +126,144 @@ function orthonormalize(R: number[]): number[] {
     nc0[1], nc1[1], nc2[1],
     nc0[2], nc1[2], nc2[2],
   ];
+}
+
+// ─── Ghost foot wireframe ─────────────────────────────────────────────────────
+//
+// A minimal right-foot wireframe centred on the A4 sheet (world origin).
+// Three layers:
+//   GF_SOLE    — 15-point sole footprint outline at Y = 0 (ground plane)
+//   GF_INSTEP  —  7-point oval at the foot's instep height (~5–7 cm)
+//   GF_RIBS    — 5 vertical edges connecting SOLE → INSTEP (depth cue)
+//   GF_TOES    — 5 short stubs rising from each toe tip (height cue)
+//
+// Coordinate system (world / A4 sheet):
+//   X = long axis of the A4 sheet (heel at −X, toes at +X)
+//   Z = short axis (medial / big-toe side at +Z, lateral at −Z)
+//   Y = vertical (0 = sheet, up = positive)
+// Units: metres.
+
+type Pt3 = [number, number, number];
+
+/** Sole footprint outline — 15 vertices, closed loop. */
+const GF_SOLE: Pt3[] = [
+  [-0.108,  0,  0.028],  //  0  heel inner (medial)
+  [-0.120,  0,  0.000],  //  1  heel back
+  [-0.108,  0, -0.028],  //  2  heel outer (lateral)
+  [-0.060,  0, -0.044],  //  3  mid-foot outer
+  [ 0.005,  0, -0.047],  //  4  arch outer
+  [ 0.060,  0, -0.043],  //  5  ball outer
+  [ 0.100,  0, -0.030],  //  6  5th toe base
+  [ 0.118,  0, -0.016],  //  7  5th toe tip
+  [ 0.128,  0,  0.000],  //  8  4th toe tip
+  [ 0.125,  0,  0.018],  //  9  3rd toe tip
+  [ 0.116,  0,  0.033],  // 10  2nd toe tip
+  [ 0.095,  0,  0.048],  // 11  big toe tip
+  [ 0.058,  0,  0.053],  // 12  ball inner (medial)
+  [-0.002,  0,  0.040],  // 13  arch inner
+  [-0.060,  0,  0.040],  // 14  mid-foot inner
+];
+
+/** Instep oval — 7 vertices, closed loop at foot-top height. */
+const GF_INSTEP: Pt3[] = [
+  [-0.092, 0.054,  0.018],  // 0  heel top medial
+  [-0.102, 0.038,  0.000],  // 1  heel top back
+  [-0.092, 0.054, -0.018],  // 2  heel top lateral
+  [-0.032, 0.068, -0.030],  // 3  instep outer
+  [ 0.038, 0.064, -0.026],  // 4  ball outer top
+  [ 0.038, 0.064,  0.022],  // 5  ball inner top
+  [-0.032, 0.068,  0.030],  // 6  instep inner
+];
+
+/** Vertical rib pairs [sole index, instep index]. */
+const GF_RIBS: [number, number][] = [
+  [1, 1],   // heel back
+  [3, 3],   // mid outer
+  [12, 5],  // ball inner
+  [14, 6],  // mid inner
+  [0, 0],   // heel inner
+];
+
+/** Toe stubs: [ground base, elevated tip]. One per digit, lateral → medial. */
+const GF_TOES: [Pt3, Pt3][] = [
+  [[ 0.118, 0, -0.016], [ 0.118, 0.016, -0.016]],  // 5th
+  [[ 0.128, 0,  0.000], [ 0.128, 0.019,  0.000]],  // 4th
+  [[ 0.125, 0,  0.018], [ 0.125, 0.021,  0.018]],  // 3rd
+  [[ 0.116, 0,  0.033], [ 0.116, 0.021,  0.033]],  // 2nd
+  [[ 0.095, 0,  0.048], [ 0.095, 0.026,  0.048]],  // big toe
+];
+
+/**
+ * Draw the ghost foot wireframe onto the canvas.
+ *
+ * All vertices are projected with the current pose, so the foot stays
+ * locked to the A4 sheet as the phone moves.  Each segment is drawn
+ * independently — a single behind-camera vertex skips only that edge,
+ * not the whole outline.
+ *
+ * Visual style: ice-blue tint at globalAlpha = 0.20 (unobtrusive).
+ */
+function drawGhostFoot(
+  ctx: CanvasRenderingContext2D,
+  pose: CameraPose,
+  K: CameraIntrinsics,
+) {
+  const proj = (p: Pt3) => projectPoint3D(p, pose, K);
+
+  /** Draw a closed polygon segment-by-segment; skips behind-camera edges. */
+  const drawLoop = (pts: Pt3[]) => {
+    for (let i = 0; i < pts.length; i++) {
+      const a = proj(pts[i]);
+      const b = proj(pts[(i + 1) % pts.length]);
+      if (!a || !b) continue;
+      ctx.beginPath();
+      ctx.moveTo(a[0], a[1]);
+      ctx.lineTo(b[0], b[1]);
+      ctx.stroke();
+    }
+  };
+
+  /** Draw a single straight edge. */
+  const drawEdge = (p1: Pt3, p2: Pt3) => {
+    const a = proj(p1);
+    const b = proj(p2);
+    if (!a || !b) return;
+    ctx.beginPath();
+    ctx.moveTo(a[0], a[1]);
+    ctx.lineTo(b[0], b[1]);
+    ctx.stroke();
+  };
+
+  ctx.save();
+  ctx.globalAlpha = 0.20;
+  ctx.strokeStyle = "rgba(190, 228, 255, 1)"; // ice-blue tint (Starlink palette)
+  ctx.lineWidth   = 1.4;
+  ctx.lineCap     = "round";
+  ctx.lineJoin    = "round";
+
+  drawLoop(GF_SOLE);    // sole footprint
+  drawLoop(GF_INSTEP);  // instep oval
+
+  for (const [si, ii] of GF_RIBS) {
+    drawEdge(GF_SOLE[si], GF_INSTEP[ii]);
+  }
+
+  for (const [base, tip] of GF_TOES) {
+    drawEdge(base, tip);
+  }
+
+  // Origin cross — small + marker at A4 centre for alignment reference
+  const O = proj([0, 0, 0]);
+  if (O) {
+    const ARM = 6; // px
+    ctx.globalAlpha = 0.30;
+    ctx.beginPath();
+    ctx.moveTo(O[0] - ARM, O[1]); ctx.lineTo(O[0] + ARM, O[1]);
+    ctx.moveTo(O[0], O[1] - ARM); ctx.lineTo(O[0], O[1] + ARM);
+    ctx.stroke();
+  }
+
+  ctx.restore();
 }
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -564,7 +705,16 @@ export function FootEraserCanvas({
         (p) => now - p.diedAt < DYING_MS,
       );
 
-      // ── 5. Draw outer scanning ring (faint amber) ─────────────────────────
+      // ── 5. Ghost foot — translucent wireframe reference ──────────────────
+      //
+      // Rendered first (before dome dots) so dots always appear on top.
+      // Visible whenever we have a valid (live or ghost) pose — helps the
+      // user verify that the 3D tracking is correctly aligned to the sheet.
+      if (trackingOk && smoothedPoseRef.current) {
+        drawGhostFoot(ctx, smoothedPoseRef.current, K);
+      }
+
+      // ── 6. Draw outer scanning ring (faint amber) ─────────────────────────
       if (trackingLive) {  // only when markers are present — ghost mode hides the guide ring
         ctx.save();
         ctx.setLineDash([7, 6]);
@@ -576,7 +726,7 @@ export function FootEraserCanvas({
         ctx.restore();
       }
 
-      // ── 6. Idle dots — white translucent ─────────────────────────────────
+      // ── 7. Idle dots — white translucent ─────────────────────────────────
       ctx.fillStyle = C_IDLE;
       for (const dot of idleDots) {
         ctx.beginPath();
@@ -584,7 +734,7 @@ export function FootEraserCanvas({
         ctx.fill();
       }
 
-      // ── 7. Scanning dots — amber + glow ──────────────────────────────────
+      // ── 8. Scanning dots — amber + glow ──────────────────────────────────
       for (const dot of scanDots) {
         ctx.beginPath();
         ctx.arc(dot.sx, dot.sy, DOT_R_SCAN + 5, 0, Math.PI * 2);
@@ -596,7 +746,7 @@ export function FootEraserCanvas({
         ctx.fill();
       }
 
-      // ── 8. animatingPoints — ease-out contraction + fade (250 ms) ────────
+      // ── 9. animatingPoints — ease-out contraction + fade (250 ms) ────────
       //
       // t = 1 → 0 as the point ages toward its death.
       //
@@ -628,7 +778,7 @@ export function FootEraserCanvas({
         ctx.restore();
       }
 
-      // ── 9. Mirino (targeting reticle) — always visible ───────────────────
+      // ── 10. Mirino (targeting reticle) — always visible ──────────────────
       //   LIVE  → full white (C_MIRINO)
       //   GHOST → half-dim (C_MIRINO_GHOST) — dots frozen, no new erasure
       //   LOST  → very dim (C_MIRINO_LO)
@@ -639,7 +789,7 @@ export function FootEraserCanvas({
           : C_MIRINO_LO;
       drawMirino(ctx, cx, cy, MIRINO_RADIUS_PX, mirinoColor);
 
-      // ── 10. Debug box — bottom-left, always on ────────────────────────────
+      // ── 11. Debug box — bottom-left, always on ───────────────────────────
       const trackingLabel = trackingLive
         ? "● LIVE"
         : trackingGhost
