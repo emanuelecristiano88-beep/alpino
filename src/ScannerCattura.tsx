@@ -17,6 +17,30 @@ import type { ObservationData } from "./lib/aruco/poseEstimation";
 import { A4_SHEET_DIMS_MM } from "./lib/aruco/sheetDimensions";
 
 /**
+ * One high-resolution video snapshot captured at a 10 % progress milestone.
+ * The camera pose at capture time (from the most-recent ArUco observation) is
+ * stored alongside the image so the renderer can correctly UV-map the texture
+ * onto the 3-D foot model from the exact viewpoint it was photographed.
+ */
+export interface TextureFrame {
+  /** Progress milestone at which this frame was captured: 10, 20 … 100. */
+  progressPct: number;
+  /**
+   * JPEG dataURL at native video resolution (up to 1920 × 1080).
+   * Encode quality 0.92 — suitable for UV-mapped texturing.
+   */
+  imageDataUrl: string;
+  /** Camera world position (metres, Y-up, A4-centre origin) at capture time. */
+  cameraWorldPos: [number, number, number];
+  /** Camera optical-axis direction (unit vector) in world space. */
+  lookDirWorld: [number, number, number];
+  /** 3×3 rotation matrix (row-major, world → camera) at capture time. */
+  cameraRotationMatrix: number[];
+  /** performance.now() timestamp of the capture. */
+  timestamp: number;
+}
+
+/**
  * Final scan payload sent to the backend for 3D foot model generation.
  * Serialisable as JSON — all fields are plain numbers / strings / arrays.
  */
@@ -31,6 +55,12 @@ export interface ScanPayload {
   totalPoints: number;
   /** Elapsed time from first captured point to scan completion (ms). */
   scanDurationMs: number | null;
+  /**
+   * High-resolution snapshots taken every 10 % of scan progress (up to 10).
+   * Each frame carries the camera pose so the renderer can back-project the
+   * texture onto the 3-D model correctly.
+   */
+  textureFrames: TextureFrame[];
 }
 import { ScannerAppleProgress } from "./components/scanner/ScannerAppleProgress";
 import { useScanGuidance } from "./hooks/useScanGuidance";
@@ -615,6 +645,21 @@ export default function ScannerCattura() {
   const scanStartTimeRef   = useRef<number | null>(null);
   /** True while the "Invia al Designer" button is in its sending animation. */
   const [isSendingPayload, setIsSendingPayload] = React.useState(false);
+
+  /**
+   * High-res video snapshots captured at every 10 % eraser progress milestone.
+   * Each entry pairs the raw JPEG image with the ArUco-derived camera pose so
+   * the renderer can correctly project the texture onto the 3-D foot model.
+   * Not stored in React state — never triggers a re-render.
+   */
+  const textureFramesRef    = useRef<TextureFrame[]>([]);
+  /**
+   * The last 10 % milestone for which a texture snapshot was already taken
+   * (0 = none yet).  Prevents duplicate captures if eraser.progress
+   * briefly fluctuates around a threshold.
+   */
+  const lastMilestonePctRef = useRef<number>(0);
+
   /** Last captured video frame URL (JPEG dataURL) — frozen as overlay background. */
   const frozenFrameRef = useRef<string | null>(null);
   /** Snapshot of observations + frozen frame shown in the review overlay. */
@@ -1278,6 +1323,7 @@ export default function ScannerCattura() {
       capturedPoints:   [...captured],
       totalPoints:      captured.length,
       scanDurationMs:   startTime !== null ? Math.round(endTime - startTime) : null,
+      textureFrames:    [...textureFramesRef.current],
     };
 
     scanPayloadRef.current = payload;
@@ -1285,7 +1331,8 @@ export default function ScannerCattura() {
     console.log(
       `[NEUMA] scanPayload pronto — ${payload.totalPoints} punti, ` +
       `durata ${payload.scanDurationMs != null ? (payload.scanDurationMs / 1000).toFixed(1) + "s" : "n/a"}, ` +
-      `foglio ${payload.sheetDimensions.widthMm}×${payload.sheetDimensions.heightMm}mm`,
+      `foglio ${payload.sheetDimensions.widthMm}×${payload.sheetDimensions.heightMm}mm, ` +
+      `texture ${payload.textureFrames.length} frame`,
     );
 
     // ── Capture the current video frame as background for the review overlay ─
@@ -1314,6 +1361,74 @@ export default function ScannerCattura() {
     setFinalCountdown(1);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [eraser.isComplete, cameraState]);
+
+  // ── Automatic texture-frame capture at every 10 % progress milestone ──────
+  //
+  // Each time the eraser progress crosses a new 10 % boundary (10 → 20 → … → 100)
+  // we silently grab the current video frame at full (native) resolution together
+  // with the camera pose from the most-recent ArUco observation.
+  //
+  // Why here and not inside FootEraserCanvas?
+  //   • We need the raw videoRef (HTMLVideoElement) to capture at native res.
+  //   • The camera pose is already mirrored in capturedDataRef — no extra callback needed.
+  //   • Keeping capture logic in one place makes reset / payload assembly simpler.
+  //
+  // Performance note: canvas.toDataURL('image/jpeg', 0.92) on a 1920×1080 frame
+  // is synchronous and blocks for ~10–40 ms on mid-range Android.  We accept this
+  // because it happens at most 10 times per scan (once per 10 % milestone).
+  useEffect(() => {
+    if (!STARLINK_DOT_CLOUD_MODE || cameraState !== "readyPhase") return;
+    if (eraser.isComplete) return; // final snapshot already taken in isComplete effect
+
+    const progress  = eraser.progress;
+    const milestone = Math.floor(progress / 10) * 10; // e.g. 37 → 30
+    if (milestone <= 0 || milestone <= lastMilestonePctRef.current) return;
+
+    // New milestone reached — record it immediately so the next render
+    // cycle doesn't double-capture even if progress bounces.
+    lastMilestonePctRef.current = milestone;
+
+    const vid = videoRef.current;
+    if (!vid || vid.videoWidth === 0) return;
+
+    // ── Camera pose: use the most-recent ArUco observation ────────────────
+    const obs        = capturedDataRef.current;
+    const latestObs  = obs.length > 0 ? obs[obs.length - 1] : null;
+
+    // ── Capture video frame at native resolution ──────────────────────────
+    try {
+      const fc   = document.createElement("canvas");
+      fc.width   = vid.videoWidth;
+      fc.height  = vid.videoHeight;
+      const fctx = fc.getContext("2d");
+      if (!fctx) return;
+      fctx.drawImage(vid, 0, 0);
+
+      const imageDataUrl = fc.toDataURL("image/jpeg", 0.92);
+
+      const frame: TextureFrame = {
+        progressPct:          milestone,
+        imageDataUrl,
+        cameraWorldPos:       latestObs?.cameraWorldPos       ?? [0, 0, 0],
+        lookDirWorld:         latestObs?.lookDirWorld         ?? [0, -1, 0],
+        cameraRotationMatrix: latestObs?.cameraRotationMatrix ?? [],
+        timestamp:            performance.now(),
+      };
+
+      textureFramesRef.current.push(frame);
+
+      console.log(
+        `[NEUMA] 📸 Texture frame ${milestone}%` +
+        ` — ${vid.videoWidth}×${vid.videoHeight}` +
+        ` — frame ${textureFramesRef.current.length}/10` +
+        ` — ${(imageDataUrl.length / 1024).toFixed(0)} KB`,
+      );
+    } catch (err) {
+      console.warn("[NEUMA] Texture frame capture failed:", err);
+    }
+  // eraser.progress changes drive this; eraser.isComplete guards early exit
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [eraser.progress, eraser.isComplete, cameraState]);
 
   /** Angolo istantaneo 0–360° (stesso mapping dei settori); null senza foglio o tilt debole. */
   const liveOrbitAngleDeg = useMemo(() => {
@@ -1495,9 +1610,11 @@ export default function ScannerCattura() {
   /** "Rifai Scansione" — discard current scan and start fresh. */
   const handleReviewRetry = useCallback(() => {
     eraser.reset();
-    capturedDataRef.current  = [];
-    scanPayloadRef.current   = null;
-    frozenFrameRef.current   = null;
+    capturedDataRef.current    = [];
+    scanPayloadRef.current     = null;
+    frozenFrameRef.current     = null;
+    textureFramesRef.current   = [];
+    lastMilestonePctRef.current = 0;
     setReviewData(null);
     setIsSendingPayload(false);
     setFinalCountdown(null);
@@ -2205,9 +2322,11 @@ export default function ScannerCattura() {
     dotCloudConsumedRef.current = 0;
     dotCloudStartedRef.current = false;
     dotCloudDoneRef.current = false;
-    capturedDataRef.current  = [];
-    scanPayloadRef.current   = null;
-    scanStartTimeRef.current = null;
+    capturedDataRef.current    = [];
+    scanPayloadRef.current     = null;
+    scanStartTimeRef.current   = null;
+    textureFramesRef.current   = [];
+    lastMilestonePctRef.current = 0;
     setIsSendingPayload(false);
     setDotCloudProgressPct(0);
     domeFadeStartAtRef.current = 0;
