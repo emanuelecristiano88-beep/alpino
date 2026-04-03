@@ -431,6 +431,102 @@ function drawHolographicFoot(
   }
 }
 
+// ─── Height triangulation ─────────────────────────────────────────────────────
+
+/**
+ * Incremental ray-ray triangulation for foot height estimation.
+ *
+ * Geometry:  The A4 sheet is the Y = 0 world plane.  Each erased observation
+ * carries a camera origin C and a look direction D (the camera's optical axis
+ * in world space).  The ray  C + t·D  passes from outside the dome, through the
+ * virtual dome surface point, continues inside the dome and would eventually
+ * hit the A4 plane.  The real foot surface is somewhere along this ray between
+ * the dome point and the A4 plane.
+ *
+ * When two rays from sufficiently different viewpoints are found, their nearest
+ * points are computed (standard skew-line closest-point formula) and their
+ * midpoint is taken as an estimated 3-D surface sample.  Its Y coordinate
+ * (in metres) is the estimated foot height at that (X, Z) location.
+ *
+ * Called incrementally: each new observation is paired with all previous ones,
+ * giving O(n) work per new point, O(n²/2) total.  With at most 150 dome points,
+ * this is at most 11 175 pair evaluations — negligible overhead.
+ *
+ * Noise filters applied per pair:
+ *   • Rays must not be nearly parallel   (|D1·D2| > 0.97 → skip)
+ *   • Both t parameters must be positive (point in front of camera)
+ *   • Residual distance between nearest points ≤ 60 mm (poor convergence guard)
+ *   • Midpoint Y must be in [2 mm, 150 mm] — above sheet, plausible foot height
+ *   • Midpoint (X, Z) must lie within A4 bounds (with a small margin)
+ *
+ * @returns The newly found maximum height in mm, or 0 if no valid pair found.
+ */
+function triangulateMaxHeight(
+  newObs: ObservationData,
+  prevObs: ObservationData[],
+): number {
+  // Spatial bounds (metres)
+  const A4_HALF_X  = 0.157; // 297 mm / 2 + 8 mm margin
+  const A4_HALF_Z  = 0.113; // 210 mm / 2 + 8 mm margin
+  const MIN_H      = 0.002; // 2 mm  — virtual base-plane guard
+  const MAX_H      = 0.155; // 155 mm — maximum plausible foot+shoe height
+  const MAX_RESID  = 0.060; // 60 mm  — ray-ray residual quality filter
+
+  let maxH = 0;
+
+  const [c1x, c1y, c1z] = newObs.cameraWorldPos;
+  const [d1x, d1y, d1z] = newObs.lookDirWorld;
+
+  for (const o2 of prevObs) {
+    const [c2x, c2y, c2z] = o2.cameraWorldPos;
+    const [d2x, d2y, d2z] = o2.lookDirWorld;
+
+    // Skip near-parallel rays — height poorly determined
+    const dotDD = d1x * d2x + d1y * d2y + d1z * d2z;
+    if (Math.abs(dotDD) > 0.970) continue;
+
+    // Vector between ray origins
+    const wx = c1x - c2x, wy2 = c1y - c2y, wz = c1z - c2z;
+
+    // Standard skew-line nearest-point formula
+    const b   = dotDD;
+    const d   = d1x * wx + d1y * wy2 + d1z * wz;
+    const e   = d2x * wx + d2y * wy2 + d2z * wz;
+    const den = 1 - b * b;
+    if (den < 1e-8) continue;
+
+    const t1 = (b * e - d) / den;
+    const t2 = (e - b * d) / den;
+
+    // Both points must be in front of their respective cameras
+    if (t1 < 0.01 || t2 < 0.01) continue;
+
+    // Closest points on each ray
+    const p1x = c1x + t1 * d1x, p1y = c1y + t1 * d1y, p1z = c1z + t1 * d1z;
+    const p2x = c2x + t2 * d2x, p2y = c2y + t2 * d2y, p2z = c2z + t2 * d2z;
+
+    // Residual (quality check — large residual = poorly converging rays)
+    const rdx = p1x - p2x, rdy = p1y - p2y, rdz = p1z - p2z;
+    if (rdx * rdx + rdy * rdy + rdz * rdz > MAX_RESID * MAX_RESID) continue;
+
+    // Midpoint = estimated 3-D surface sample
+    const my = (p1y + p2y) * 0.5;
+
+    // ── Virtual base-plane guard: discard points below the A4 sheet ──────
+    if (my < MIN_H || my > MAX_H) continue;
+
+    // ── XZ bounding check: must lie over the A4 sheet ────────────────────
+    const mx = (p1x + p2x) * 0.5;
+    const mz = (p1z + p2z) * 0.5;
+    if (Math.abs(mx) > A4_HALF_X || Math.abs(mz) > A4_HALF_Z) continue;
+
+    const hMm = my * 1000;
+    if (hMm > maxH) maxH = hMm;
+  }
+
+  return maxH;
+}
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 /**
@@ -544,6 +640,11 @@ function drawDebugBox(
    * Displayed in the debug box so Emanuele can spot thermal throttling.
    */
   tier: PerfTier,
+  /**
+   * Maximum foot height estimated via ray-ray triangulation (mm).
+   * Null when no valid triangulation yet (< 2 observations).
+   */
+  maxHeightMm: number | null,
 ) {
   const PAD   = 10;
   const FONT  = "12px ui-monospace, monospace";
@@ -584,6 +685,20 @@ function drawDebugBox(
     tier === "low"      ? "rgba(251, 191, 36, 0.95)"  : // amber — throttled
                           "rgba(239, 68, 68,  0.95)";   // red — critical / low power
 
+  // Height line — color-coded by plausibility
+  let heightLine:  string;
+  let heightColor: string;
+  if (maxHeightMm === null || maxHeightMm <= 0) {
+    heightLine  = "ALTEZZA TALLONE: —";
+    heightColor = "rgba(255,255,255,0.35)";
+  } else if (maxHeightMm < 15) {
+    heightLine  = `ALTEZZA TALLONE: ${maxHeightMm.toFixed(1)}mm ⚠`;
+    heightColor = "rgba(251,191,36,0.90)"; // amber — very low, likely noisy
+  } else {
+    heightLine  = `ALTEZZA TALLONE: ${maxHeightMm.toFixed(1)}mm`;
+    heightColor = "rgba(52, 211, 153, 0.95)"; // mint — valid measurement
+  }
+
   const lines = [
     `FPS: ${fps.toFixed(1)}`,
     `MARKERS: ${markerCount}`,
@@ -591,11 +706,13 @@ function drawDebugBox(
     `SCANNED: ${consumed}/150`,
     pixPerMm !== null ? `SCALE: ${pixPerMm.toFixed(2)} px/mm` : `SCALE: —`,
     precisionLine,
+    heightLine,
     tierLabel,
   ];
   const lineColors = [
     baseColor, baseColor, baseColor, baseColor, baseColor,
     precisionColor,
+    heightColor,
     tierColor,
   ];
 
@@ -719,6 +836,15 @@ export function FootEraserCanvas({
 
   const motionBlurBlockingRef = useRef(motionBlurBlocking);
 
+  /**
+   * Local mirror of all ObservationData captured in this scan pass.
+   * Used for incremental height triangulation without touching the parent's ref.
+   * Reset when the eraser is reset (detected via totalConsumed reaching 0 in draw loop).
+   */
+  const localObsRef    = useRef<ObservationData[]>([]);
+  /** Maximum foot height estimated via ray-ray triangulation, in mm. 0 = no data yet. */
+  const maxHeightMmRef = useRef<number>(0);
+
   useEffect(() => { quadsRef.current = markerQuads; }, [markerQuads]);
   useEffect(() => { onPointCapturedRef.current = onPointCaptured; }, [onPointCaptured]);
   useEffect(() => { motionBlurBlockingRef.current = motionBlurBlocking; }, [motionBlurBlocking]);
@@ -786,6 +912,13 @@ export function FootEraserCanvas({
       if (canvas.width !== w || canvas.height !== h) {
         canvas.width  = w;
         canvas.height = h;
+      }
+
+      // ── Scan-reset detection — clear local triangulation state ───────────
+      // eraser.totalConsumed going back to 0 means the user pressed "Rifai".
+      if (eraser.totalConsumed === 0 && localObsRef.current.length > 0) {
+        localObsRef.current    = [];
+        maxHeightMmRef.current = 0;
       }
       if (w === 0 || h === 0) { rafRef.current = requestAnimationFrame(draw); return; }
 
@@ -1150,6 +1283,20 @@ export function FootEraserCanvas({
                   timestamp:            now,
                 };
                 cb(obs);
+
+                // ── Incremental height triangulation ─────────────────────
+                // Pair the new observation with every previous one to find
+                // camera-ray intersections inside the dome (= foot surface).
+                const newH = triangulateMaxHeight(obs, localObsRef.current);
+                localObsRef.current.push(obs);
+                if (newH > maxHeightMmRef.current) {
+                  maxHeightMmRef.current = newH;
+                  console.log(
+                    `[NEUMA] Altezza piede aggiornata: ${newH.toFixed(1)} mm` +
+                    ` (da ${localObsRef.current.length} osservazioni)`,
+                  );
+                }
+
                 console.log(
                   `Punto di osservazione salvato per il pallino ID: ${dot.id}` +
                   ` | pos=(${cameraWorldPos.map((v) => v.toFixed(3)).join(", ")})m`,
@@ -1389,6 +1536,7 @@ export function FootEraserCanvas({
         pixPerMm,
         precisionMm,
         tier,
+        maxHeightMmRef.current > 0 ? maxHeightMmRef.current : null,
       );
 
       rafRef.current = requestAnimationFrame(draw);
