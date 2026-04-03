@@ -87,6 +87,29 @@ const GUIDANCE_HOLD_MS = 1100;
 /** Interval between brightness samples (ms) — sampling is expensive. */
 const BRIGHTNESS_SAMPLE_INTERVAL = 2500;
 
+// ─── Performance tier ─────────────────────────────────────────────────────────
+
+/**
+ * Four rendering quality tiers.
+ *
+ *  HIGH     ≥ 24 fps — full quality (grid, glow, glass prism, all dots)
+ *  MEDIUM   ≥ 18 fps — no grid, no glass prism, no scan-dot glow, 50 % dots
+ *  LOW      ≥ 12 fps — only corner markers + hard dots at 33 % density
+ *  CRITICAL  < 12 fps OR low battery — bare minimum: dots only at 25 % density
+ *
+ * ArUco tracking (JS + RAF loop) is never throttled — only visual decoration
+ * is reduced so the CPU keeps up with marker detection.
+ */
+type PerfTier = "high" | "medium" | "low" | "critical";
+const TIER_ORDER: PerfTier[] = ["critical", "low", "medium", "high"];
+
+const TIER_HIGH_FPS      = 24;   // ≥ this → HIGH
+const TIER_MEDIUM_FPS    = 18;   // ≥ this → MEDIUM
+const TIER_LOW_FPS       = 12;   // ≥ this → LOW  /  < this → CRITICAL
+const TIER_HYSTERESIS_MS = 3500; // ms to wait before upgrading tier
+const FPS_WINDOW_SIZE    = 40;   // number of per-frame samples (~1.3 s @ 30 fps)
+const LOW_BATTERY_THRESH = 0.15; // 15 % battery (not charging) → Low Power Mode
+
 // ─── Scale EMA (precision estimation) ────────────────────────────────────────
 
 /**
@@ -269,7 +292,11 @@ function drawHolographicFoot(
   pose: CameraPose,
   K: CameraIntrinsics,
   now: number,
+  tier: PerfTier = "high",
 ) {
+  // CRITICAL tier: skip the entire hologram to free the GPU for tracking
+  if (tier === "critical") return;
+
   const proj = (p: Pt3) => projectPoint3D(p, pose, K);
 
   // Breathing: smooth cosine pulse 0.20 → 0.50 → 0.20 every 2 s
@@ -280,9 +307,8 @@ function drawHolographicFoot(
   const CYAN    = "rgba(0, 210, 255, 1)";
   const CYAN_HI = "rgba(200, 248, 255, 1)";
 
-  // ── 1. Floor grid (A4 plane, Y = 0) ───────────────────────────────────────
-  // Grid spacing 3 cm → 10 × 7 cells inside the 297 × 210 mm sheet.
-  {
+  // ── 1. Floor grid — HIGH only (most expensive: ~70 line-strokes per frame)
+  if (tier === "high") {
     ctx.save();
     ctx.strokeStyle = CYAN;
     ctx.lineWidth   = 0.5;
@@ -301,9 +327,8 @@ function drawHolographicFoot(
     ctx.restore();
   }
 
-  // ── 2. Glass prism (ultra-thin outline, almost imperceptible) ─────────────
-  // lineWidth 0.6, effective alpha ≈ 2–5% — just enough to suggest volume.
-  {
+  // ── 2. Glass prism — HIGH + MEDIUM (thin outlines, cheaper than grid)
+  if (tier === "high" || tier === "medium") {
     ctx.save();
     ctx.strokeStyle = CYAN_HI;
     ctx.lineWidth   = 0.6;
@@ -322,22 +347,26 @@ function drawHolographicFoot(
     ctx.restore();
   }
 
-  // ── 3. Cyan point cloud — soft glow halo + hard dot per vertex ────────────
+  // ── 3. Cyan point cloud — glow halo only on HIGH/MEDIUM; hard dot always
+  //        LOW tier: hard dots only (no radialGradient — expensive on mobile)
   {
+    const showGlow = tier === "high" || tier === "medium";
     ctx.save();
     for (const pt of GF_ALL_CLOUD) {
       const p = proj(pt);
       if (!p) continue;
 
-      // Soft glow halo (radial gradient, low alpha)
-      ctx.globalAlpha = breathAlpha * 0.24;
-      const grd = ctx.createRadialGradient(p[0], p[1], 0, p[0], p[1], 7);
-      grd.addColorStop(0, "rgba(0, 200, 255, 1)");
-      grd.addColorStop(1, "rgba(0, 200, 255, 0)");
-      ctx.fillStyle = grd;
-      ctx.beginPath(); ctx.arc(p[0], p[1], 7, 0, Math.PI * 2); ctx.fill();
+      if (showGlow) {
+        // Soft glow halo (radialGradient — skipped on LOW to save GPU)
+        ctx.globalAlpha = breathAlpha * 0.24;
+        const grd = ctx.createRadialGradient(p[0], p[1], 0, p[0], p[1], 7);
+        grd.addColorStop(0, "rgba(0, 200, 255, 1)");
+        grd.addColorStop(1, "rgba(0, 200, 255, 0)");
+        ctx.fillStyle = grd;
+        ctx.beginPath(); ctx.arc(p[0], p[1], 7, 0, Math.PI * 2); ctx.fill();
+      }
 
-      // Bright hard dot
+      // Bright hard dot — always visible
       ctx.globalAlpha = breathAlpha;
       ctx.fillStyle   = CYAN_HI;
       ctx.beginPath(); ctx.arc(p[0], p[1], 2.0, 0, Math.PI * 2); ctx.fill();
@@ -506,13 +535,14 @@ function drawDebugBox(
   pixPerMm: number | null,
   /**
    * Estimated positional precision in mm (null during warm-up or tracking loss).
-   * Derived from the EMA variance of the pixel-per-mm scale.
-   * Color-coded:
-   *   ≤ 0.5 mm  → mint green  (excellent)
-   *   ≤ 1.5 mm  → white       (good)
-   *   > 1.5 mm  → amber       (degraded)
+   * Color-coded: mint green ≤0.5 mm, white ≤1.5 mm, amber >1.5 mm.
    */
   precisionMm: number | null,
+  /**
+   * Current rendering performance tier.
+   * Displayed in the debug box so Emanuele can spot thermal throttling.
+   */
+  tier: PerfTier,
 ) {
   const PAD   = 10;
   const FONT  = "12px ui-monospace, monospace";
@@ -541,6 +571,18 @@ function drawDebugBox(
     precisionColor = "rgba(251,191,36,0.95)";      // amber — degraded
   }
 
+  // Tier label with low-power indicator
+  const tierLabel =
+    tier === "high"     ? "PERF: ● HIGH" :
+    tier === "medium"   ? "PERF: ◑ MED"  :
+    tier === "low"      ? "PERF: ◐ LOW"  :
+                          "PERF: ○ CRIT";
+  const tierColor =
+    tier === "high"     ? "rgba(52, 211, 153, 0.95)" : // mint — full quality
+    tier === "medium"   ? "rgba(255, 255, 255, 0.85)" : // white — mild throttle
+    tier === "low"      ? "rgba(251, 191, 36, 0.95)"  : // amber — throttled
+                          "rgba(239, 68, 68,  0.95)";   // red — critical / low power
+
   const lines = [
     `FPS: ${fps.toFixed(1)}`,
     `MARKERS: ${markerCount}`,
@@ -548,6 +590,12 @@ function drawDebugBox(
     `SCANNED: ${consumed}/150`,
     pixPerMm !== null ? `SCALE: ${pixPerMm.toFixed(2)} px/mm` : `SCALE: —`,
     precisionLine,
+    tierLabel,
+  ];
+  const lineColors = [
+    baseColor, baseColor, baseColor, baseColor, baseColor,
+    precisionColor,
+    tierColor,
   ];
 
   const maxW  = Math.max(...lines.map((l) => ctx.measureText(l).width));
@@ -566,9 +614,9 @@ function drawDebugBox(
   ctx.roundRect(bx, by, boxW, boxH, 8);
   ctx.fill();
 
-  // Draw lines — all in base colour except the last (precision) line
+  // Draw lines — each line has its own colour from lineColors
   for (let i = 0; i < lines.length; i++) {
-    ctx.fillStyle = i === lines.length - 1 ? precisionColor : baseColor;
+    ctx.fillStyle = lineColors[i] ?? baseColor;
     ctx.fillText(lines[i], bx + PAD, by + PAD + (i + 0.8) * LINE);
   }
 
@@ -644,8 +692,67 @@ export function FootEraserCanvas({
    */
   const scaleVarEmaRef         = useRef<number>(0);
 
+  // ── Performance tier state ───────────────────────────────────────────────
+  /** Per-frame instantaneous FPS samples used to compute median. */
+  const fpsWindowRef           = useRef<number[]>([]);
+  /** Current rendering tier — drives visual throttling decisions. */
+  const perfTierRef            = useRef<PerfTier>("high");
+  /**
+   * rafTime of the last tier change.
+   * Prevents thrashing: tier can only UPGRADE after TIER_HYSTERESIS_MS.
+   * Downgrades are always immediate.
+   */
+  const tierChangedAtRef       = useRef<number>(0);
+  /**
+   * True when the Battery API reports ≤ 15 % and not charging.
+   * In Low Power Mode the tier is capped at 'low' (or 'critical' if fps < 12).
+   */
+  const lowPowerRef            = useRef<boolean>(false);
+
   useEffect(() => { quadsRef.current = markerQuads; }, [markerQuads]);
   useEffect(() => { onPointCapturedRef.current = onPointCaptured; }, [onPointCaptured]);
+
+  // ── Battery / Low Power Mode detection ───────────────────────────────────
+  useEffect(() => {
+    if (typeof navigator === "undefined") return;
+
+    // Minimal type shim — the Battery API is not yet in TypeScript's lib.dom.
+    type BatMgr = {
+      level: number; charging: boolean;
+      addEventListener(e: string, cb: () => void): void;
+      removeEventListener(e: string, cb: () => void): void;
+    };
+    let battery: BatMgr | null = null;
+
+    const update = () => {
+      if (!battery) return;
+      const prev = lowPowerRef.current;
+      const next = battery.level <= LOW_BATTERY_THRESH && !battery.charging;
+      if (prev !== next) {
+        lowPowerRef.current = next;
+        console.log(
+          `[NEUMA] Low Power Mode: ${next
+            ? `ON — batteria ${(battery.level * 100).toFixed(0)} %, non in carica`
+            : "OFF"}`,
+        );
+      }
+    };
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (navigator as any).getBattery?.()
+      .then((b: BatMgr) => {
+        battery = b;
+        update();
+        b.addEventListener("levelchange",   update);
+        b.addEventListener("chargingchange", update);
+      })
+      .catch(() => { /* getBattery not supported — leave lowPowerRef = false */ });
+
+    return () => {
+      battery?.removeEventListener("levelchange",   update);
+      battery?.removeEventListener("chargingchange", update);
+    };
+  }, []); // run once on mount
 
   useEffect(() => {
     if (!visible) {
@@ -671,7 +778,7 @@ export function FootEraserCanvas({
       }
       if (w === 0 || h === 0) { rafRef.current = requestAnimationFrame(draw); return; }
 
-      // FPS calculation (update every ~500 ms to avoid jitter)
+      // ── FPS calculation + performance tier ─────────────────────────────
       const clk = fpsRef.current;
       clk.framesSince++;
       const elapsed = rafTime - clk.lastCalcAt;
@@ -680,6 +787,61 @@ export function FootEraserCanvas({
         clk.framesSince = 0;
         clk.lastCalcAt  = rafTime;
       }
+
+      // Per-frame instantaneous FPS → sliding median window
+      if (clk.lastAt > 0) {
+        const frameDt = rafTime - clk.lastAt;
+        if (frameDt > 4 && frameDt < 250) { // guard against tab suspend / first frame
+          const instFps = 1000 / frameDt;
+          const win = fpsWindowRef.current;
+          win.push(instFps);
+          if (win.length > FPS_WINDOW_SIZE) win.shift();
+        }
+      }
+      clk.lastAt = rafTime;
+
+      // Compute median FPS over the window (robust to brief spikes)
+      const win = fpsWindowRef.current;
+      const medianFps = win.length > 0
+        ? [...win].sort((a, b) => a - b)[Math.floor(win.length / 2)]
+        : clk.fps;
+
+      // Determine target tier
+      const lowPower = lowPowerRef.current;
+      let targetTier: PerfTier;
+      if (lowPower) {
+        // Low Power Mode caps at 'low' — no decorative rendering, tracking first
+        targetTier = medianFps < TIER_LOW_FPS ? "critical" : "low";
+      } else if (medianFps < TIER_LOW_FPS) {
+        targetTier = "critical";
+      } else if (medianFps < TIER_MEDIUM_FPS) {
+        targetTier = "low";
+      } else if (medianFps < TIER_HIGH_FPS) {
+        targetTier = "medium";
+      } else {
+        targetTier = "high";
+      }
+
+      // Apply with hysteresis: immediate downgrade, delayed upgrade
+      {
+        const prev     = perfTierRef.current;
+        const prevIdx  = TIER_ORDER.indexOf(prev);
+        const targIdx  = TIER_ORDER.indexOf(targetTier);
+        if (targIdx < prevIdx) {
+          // Downgrade: immediate — thermal / battery emergency
+          perfTierRef.current    = targetTier;
+          tierChangedAtRef.current = rafTime;
+          console.log(
+            `[NEUMA] Perf ↓ ${prev}→${targetTier}  fps=${medianFps.toFixed(1)} lowPow=${lowPower}`,
+          );
+        } else if (targIdx > prevIdx && rafTime - tierChangedAtRef.current > TIER_HYSTERESIS_MS) {
+          // Upgrade: only after sustained recovery
+          perfTierRef.current    = targetTier;
+          tierChangedAtRef.current = rafTime;
+          console.log(`[NEUMA] Perf ↑ ${prev}→${targetTier}  fps=${medianFps.toFixed(1)}`);
+        }
+      }
+      const tier = perfTierRef.current;
 
       ctx.clearRect(0, 0, w, h);
       const now = performance.now();
@@ -1015,15 +1177,25 @@ export function FootEraserCanvas({
           for (let i = 1; i < 4; i++) ctx.lineTo(sortedA4Quad[i][0], sortedA4Quad[i][1]);
           ctx.closePath();
           ctx.clip();
-          drawHolographicFoot(ctx, smoothedPoseRef.current, K, now);
+          drawHolographicFoot(ctx, smoothedPoseRef.current, K, now, tier);
           ctx.restore();
         } else {
-          drawHolographicFoot(ctx, smoothedPoseRef.current, K, now);
+          drawHolographicFoot(ctx, smoothedPoseRef.current, K, now, tier);
         }
       }
 
+      // ── Dot density throttle ─────────────────────────────────────────────
+      // Skip a fraction of dome dots to reduce GPU load at lower tiers.
+      // Dots are skipped by ID modulo to preserve spatial distribution.
+      //   HIGH     → all 150 (skip = 1)
+      //   MEDIUM   → 75  (skip = 2)
+      //   LOW      → 50  (skip = 3)
+      //   CRITICAL → 37  (skip = 4)
+      const dotSkip = tier === "high" ? 1 : tier === "medium" ? 2 : tier === "low" ? 3 : 4;
+
       // ── 6. Draw outer scanning ring (faint amber) ─────────────────────────
-      if (trackingLive) {  // only when markers are present — ghost mode hides the guide ring
+      // Hidden on CRITICAL — save one arc draw per frame.
+      if (trackingLive && tier !== "critical") {
         ctx.save();
         ctx.setLineDash([7, 6]);
         ctx.lineWidth   = 1;
@@ -1037,6 +1209,7 @@ export function FootEraserCanvas({
       // ── 7. Idle dots — white translucent, hard-clipped to A4 quad ──────────
       ctx.fillStyle = C_IDLE;
       for (const dot of idleDots) {
+        if (dotSkip > 1 && dot.id % dotSkip !== 0) continue; // density throttle
         if (
           sortedA4Quad.length === 4 &&
           !inQuadCW(dot.sx, dot.sy, sortedA4Quad, A4_CLIP_MARGIN_PX)
@@ -1047,15 +1220,21 @@ export function FootEraserCanvas({
       }
 
       // ── 8. Scanning dots — amber + glow, hard-clipped to A4 quad ─────────
+      // Glow (larger circle drawn first) is skipped on LOW/CRITICAL to avoid
+      // per-dot overdraw on a low-end GPU.
+      const showScanGlow = tier === "high" || tier === "medium";
       for (const dot of scanDots) {
+        if (dotSkip > 1 && dot.id % dotSkip !== 0) continue;
         if (
           sortedA4Quad.length === 4 &&
           !inQuadCW(dot.sx, dot.sy, sortedA4Quad, A4_CLIP_MARGIN_PX)
         ) continue;
-        ctx.beginPath();
-        ctx.arc(dot.sx, dot.sy, DOT_R_SCAN + 5, 0, Math.PI * 2);
-        ctx.fillStyle = C_SCAN_GLOW;
-        ctx.fill();
+        if (showScanGlow) {
+          ctx.beginPath();
+          ctx.arc(dot.sx, dot.sy, DOT_R_SCAN + 5, 0, Math.PI * 2);
+          ctx.fillStyle = C_SCAN_GLOW;
+          ctx.fill();
+        }
         ctx.beginPath();
         ctx.arc(dot.sx, dot.sy, DOT_R_SCAN, 0, Math.PI * 2);
         ctx.fillStyle = C_SCAN;
@@ -1168,6 +1347,7 @@ export function FootEraserCanvas({
         eraser.totalConsumed,
         pixPerMm,
         precisionMm,
+        tier,
       );
 
       rafRef.current = requestAnimationFrame(draw);
