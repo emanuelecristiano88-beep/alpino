@@ -267,6 +267,58 @@ export function projectPoint3D(
   return [u, v];
 }
 
+// ─── Real-world measurement helpers ──────────────────────────────────────────
+
+/**
+ * Derive the current pixel-per-millimetre scale from the estimated camera pose.
+ *
+ * Uses the known 297 mm long side of the A4 sheet as the fixed physical
+ * reference: projects the TL and TR corner markers and divides their pixel
+ * distance by 297 mm.
+ *
+ * This is the **Scale Lock** anchor: 1 world unit = 1 metre = 1000 mm, so
+ * `SHEET_WORLD_CORNERS[0]` and `[1]` are exactly 0.297 m = 297 mm apart.
+ *
+ * Returns 0 if either corner projects behind the camera.
+ */
+export function estimateScaleFromPose(
+  pose: CameraPose,
+  K: CameraIntrinsics,
+): number {
+  const tl = projectPoint3D(SHEET_WORLD_CORNERS[0], pose, K);
+  const tr = projectPoint3D(SHEET_WORLD_CORNERS[1], pose, K);
+  if (!tl || !tr) return 0;
+  const dx = tr[0] - tl[0];
+  const dy = tr[1] - tl[1];
+  const pxDist = Math.sqrt(dx * dx + dy * dy);
+  // A4_W is in metres; ×1000 converts to mm → result is pixels / mm
+  return pxDist / (A4_W * 1000);
+}
+
+/**
+ * Return the Euclidean distance **in millimetres** between two projected
+ * screen points, given the current pixel-per-millimetre scale.
+ *
+ * Typical use: measuring the real-world gap between two dome dots or between
+ * a dot and a reference landmark, in the same pass as the RAF draw loop.
+ *
+ * @param p1       First projected point  [u, v] in pixels.
+ * @param p2       Second projected point [u, v] in pixels.
+ * @param pixPerMm Scale factor from `estimateScaleFromPose` (pixels per mm).
+ *                 Must be > 0.
+ * @returns        Distance in mm (always ≥ 0).
+ */
+export function getRealWorldDistance(
+  p1: [number, number],
+  p2: [number, number],
+  pixPerMm: number,
+): number {
+  if (pixPerMm <= 0) return 0;
+  const dx = p2[0] - p1[0];
+  const dy = p2[1] - p1[1];
+  return Math.sqrt(dx * dx + dy * dy) / pixPerMm;
+}
+
 /**
  * Project all remaining dome points to screen coords.
  * Returns an empty array if pose is null (tracking lost).

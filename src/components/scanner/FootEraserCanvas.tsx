@@ -28,6 +28,7 @@ import {
   projectDomePoints,
   projectPoint3D,
   computeCameraWorldPos,
+  estimateScaleFromPose,
   type ObservationData,
   type CameraPose,
   type CameraIntrinsics,
@@ -85,6 +86,30 @@ const BRIGHTNESS_LOW = 60;
 const GUIDANCE_HOLD_MS = 1100;
 /** Interval between brightness samples (ms) — sampling is expensive. */
 const BRIGHTNESS_SAMPLE_INTERVAL = 2500;
+
+// ─── Scale EMA (precision estimation) ────────────────────────────────────────
+
+/**
+ * EMA blending factor for the scale stability tracker.
+ * Lower α = longer memory, smoother but slower to react.
+ * 0.10 → ~10-frame window (~330 ms at 30 fps) — enough to catch per-frame
+ * marker jitter while still converging quickly after pose changes.
+ */
+const SCALE_EMA_ALPHA = 0.10;
+
+/**
+ * Half the A4 long side in mm.  Used as the positional reference when
+ * converting scale variance to an absolute precision figure.
+ *
+ * Derivation:
+ *   sigma_corner_px ≈ sigma_scale × A4_W_MM / 2
+ *   precision_mm    = sigma_corner_px / pixPerMm
+ *                   = (sigma_scale × A4_W_MM / 2) / pixPerMm
+ *
+ * Since sigma_scale is already expressed in px/mm, sigma_corner_px carries
+ * the pixel noise introduced by the two corners bounding the long axis.
+ */
+const A4_HALF_W_MM = A4_SHEET_DIMS_MM.widthMm / 2; // 148.5 mm
 
 // ─── A4 bounding-box constants ────────────────────────────────────────────────
 
@@ -479,6 +504,15 @@ function drawDebugBox(
   consumed: number,
   /** Current scale from pose: pixels per mm (null when tracking lost). */
   pixPerMm: number | null,
+  /**
+   * Estimated positional precision in mm (null during warm-up or tracking loss).
+   * Derived from the EMA variance of the pixel-per-mm scale.
+   * Color-coded:
+   *   ≤ 0.5 mm  → mint green  (excellent)
+   *   ≤ 1.5 mm  → white       (good)
+   *   > 1.5 mm  → amber       (degraded)
+   */
+  precisionMm: number | null,
 ) {
   const PAD   = 10;
   const FONT  = "12px ui-monospace, monospace";
@@ -487,12 +521,33 @@ function drawDebugBox(
   ctx.save();
   ctx.font = FONT;
 
+  const isLive = trackingLabel.startsWith("●");
+  const baseColor = isLive ? "rgba(255,255,255,0.85)" : "rgba(255,200,100,0.85)";
+
+  // Build the precision line string + decide its colour
+  let precisionLine: string;
+  let precisionColor: string;
+  if (precisionMm === null) {
+    precisionLine  = "PRECISIONE: calibrazione…";
+    precisionColor = "rgba(255,255,255,0.40)";
+  } else if (precisionMm <= 0.5) {
+    precisionLine  = `PRECISIONE: ±${precisionMm.toFixed(2)}mm`;
+    precisionColor = "rgba(52, 211, 153, 0.95)";  // mint green — excellent
+  } else if (precisionMm <= 1.5) {
+    precisionLine  = `PRECISIONE: ±${precisionMm.toFixed(1)}mm`;
+    precisionColor = "rgba(255,255,255,0.85)";     // white — good
+  } else {
+    precisionLine  = `PRECISIONE: ±${precisionMm.toFixed(1)}mm`;
+    precisionColor = "rgba(251,191,36,0.95)";      // amber — degraded
+  }
+
   const lines = [
     `FPS: ${fps.toFixed(1)}`,
     `MARKERS: ${markerCount}`,
     `TRACKING: ${trackingLabel}`,
     `SCANNED: ${consumed}/150`,
     pixPerMm !== null ? `SCALE: ${pixPerMm.toFixed(2)} px/mm` : `SCALE: —`,
+    precisionLine,
   ];
 
   const maxW  = Math.max(...lines.map((l) => ctx.measureText(l).width));
@@ -504,17 +559,16 @@ function drawDebugBox(
   const bx = 10;
   const by = canvasH - boxH - safeBot;
 
-  // Background pill
+  // Background pill — slightly taller to accommodate the extra precision row
   ctx.fillStyle = "rgba(0, 0, 0, 0.52)";
   ctx.beginPath();
   // @ts-ignore — roundRect is available in modern browsers
   ctx.roundRect(bx, by, boxW, boxH, 8);
   ctx.fill();
 
-  // Text — amber tint when ghost/lost so the user knows tracking is degraded
-  const isLive = trackingLabel.startsWith("●");
-  ctx.fillStyle = isLive ? "rgba(255,255,255,0.85)" : "rgba(255,200,100,0.85)";
+  // Draw lines — all in base colour except the last (precision) line
   for (let i = 0; i < lines.length; i++) {
+    ctx.fillStyle = i === lines.length - 1 ? precisionColor : baseColor;
     ctx.fillText(lines[i], bx + PAD, by + PAD + (i + 0.8) * LINE);
   }
 
@@ -579,6 +633,16 @@ export function FootEraserCanvas({
   const lightCheckRef          = useRef<{ lastAt: number; brightness: number }>({
     lastAt: 0, brightness: 255,
   });
+  /**
+   * Exponential moving average of the pixel-per-mm scale (from A4 long axis).
+   * Reset to 0 when component mounts; warms up over ~10 frames.
+   */
+  const scaleEmaRef            = useRef<number>(0);
+  /**
+   * EMA of the squared deviation of pixPerMm from its mean.
+   * sqrt(scaleVarEmaRef) = running σ of the scale → used for precision estimate.
+   */
+  const scaleVarEmaRef         = useRef<number>(0);
 
   useEffect(() => { quadsRef.current = markerQuads; }, [markerQuads]);
   useEffect(() => { onPointCapturedRef.current = onPointCaptured; }, [onPointCaptured]);
@@ -668,20 +732,25 @@ export function FootEraserCanvas({
         }
       }
 
-      // ── 2b. A4 bounding quad, scale lock, lateral offset ─────────────────
+      // ── 2b. A4 bounding quad, scale lock, lateral offset, precision ──────
       //
-      // Project the 4 physical A4 corners (GF_A4_CORNERS) using the current
-      // smoothed pose to obtain the screen-space clip quad.  This quad is used:
+      // Project the 4 physical A4 corners using the current smoothed pose to
+      // obtain the screen-space clip quad.  The quad is used:
       //   • as a hard clip region for the holographic foot (ctx.clip)
       //   • for per-dot inQuadCW tests (dome dots outside the sheet are hidden)
       //   • for the amber border warning
       //
-      // Scale lock: 1 world metre = 1000 mm.  GF_A4_CORNERS span ±148.5 mm in X
-      // (= 297 mm) and ±105 mm in Z (= 210 mm).  We measure the projected pixel
-      // distance between the two top corners to derive pixels-per-mm, confirming
-      // that the homography decomposition has the correct real-world scale.
+      // Scale lock: estimateScaleFromPose projects TL/TR corners (297 mm apart)
+      // to derive px/mm.  This anchors the coordinate system to real-world mm.
+      //
+      // Precision estimate: we track an EMA of the scale and its variance.
+      //   sigma_corner_px  ≈  sigma_scale × A4_W_MM / 2   (two-corner geometry)
+      //   precision_mm      =  sigma_corner_px / pixPerMm
+      //                     =  sigma_scale × A4_HALF_W_MM  (148.5 mm)
+      // Clamped to [0.05, 5.0] mm.
       let sortedA4Quad: [number, number][] = [];
       let pixPerMm: number | null = null;
+      let precisionMm: number | null = null;
       let lateralOffset = 0;
 
       if (smoothedPoseRef.current) {
@@ -690,15 +759,33 @@ export function FootEraserCanvas({
         );
         if (cornersProj.every(Boolean)) {
           sortedA4Quad = sortQuadCW(cornersProj as [number, number][]);
-
-          // Scale: pixel distance between TL (index 0) and TR (index 1) corners
-          // divided by the 297 mm physical long side.
-          const [tl, tr] = [cornersProj[0]!, cornersProj[1]!];
-          const pxDist = Math.sqrt((tr[0] - tl[0]) ** 2 + (tr[1] - tl[1]) ** 2);
-          pixPerMm = pxDist / A4_SHEET_DIMS_MM.widthMm; // pixels per mm
         }
 
-        // Lateral distance of the camera from the A4 sheet centre (XZ plane only).
+        // Scale lock — canonical 297 mm reference via estimateScaleFromPose
+        const rawScale = estimateScaleFromPose(smoothedPoseRef.current, K);
+        if (rawScale > 0) {
+          pixPerMm = rawScale;
+
+          // EMA variance update
+          const α = SCALE_EMA_ALPHA;
+          const prevEma = scaleEmaRef.current;
+          if (prevEma === 0) {
+            scaleEmaRef.current    = rawScale;
+            scaleVarEmaRef.current = 0;
+          } else {
+            const diff = rawScale - prevEma;
+            scaleEmaRef.current    = (1 - α) * prevEma   + α * rawScale;
+            scaleVarEmaRef.current = (1 - α) * scaleVarEmaRef.current + α * diff * diff;
+          }
+
+          // Precision in mm (only once variance has warmed up beyond noise floor)
+          const sigma = Math.sqrt(scaleVarEmaRef.current);
+          if (sigma > 1e-6 && scaleEmaRef.current > 0) {
+            precisionMm = Math.min(5.0, Math.max(0.05, sigma * A4_HALF_W_MM));
+          }
+        }
+
+        // Lateral distance of the camera from the A4 sheet centre (XZ plane)
         const cp = computeCameraWorldPos(
           smoothedPoseRef.current.R,
           smoothedPoseRef.current.t,
@@ -1057,6 +1144,7 @@ export function FootEraserCanvas({
         trackingLabel,
         eraser.totalConsumed,
         pixPerMm,
+        precisionMm,
       );
 
       rafRef.current = requestAnimationFrame(draw);
