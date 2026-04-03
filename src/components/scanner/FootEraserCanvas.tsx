@@ -33,6 +33,7 @@ import {
   type CameraPose,
   type CameraIntrinsics,
 } from "@/lib/aruco/poseEstimation";
+import { isObservationOutlier } from "@/lib/scanner/observationFilter";
 import { A4_SHEET_DIMS_MM } from "@/lib/aruco/sheetDimensions";
 
 // ─── Visual constants ─────────────────────────────────────────────────────────
@@ -645,6 +646,11 @@ function drawDebugBox(
    * Null when no valid triangulation yet (< 2 observations).
    */
   maxHeightMm: number | null,
+  /**
+   * Cumulative count of observations rejected by the statistical outlier
+   * filter.  Hidden when 0 to keep the box uncluttered.
+   */
+  rejectedCount: number,
 ) {
   const PAD   = 10;
   const FONT  = "12px ui-monospace, monospace";
@@ -699,7 +705,7 @@ function drawDebugBox(
     heightColor = "rgba(52, 211, 153, 0.95)"; // mint — valid measurement
   }
 
-  const lines = [
+  const lines: string[] = [
     `FPS: ${fps.toFixed(1)}`,
     `MARKERS: ${markerCount}`,
     `TRACKING: ${trackingLabel}`,
@@ -709,12 +715,23 @@ function drawDebugBox(
     heightLine,
     tierLabel,
   ];
-  const lineColors = [
+  const lineColors: string[] = [
     baseColor, baseColor, baseColor, baseColor, baseColor,
     precisionColor,
     heightColor,
     tierColor,
   ];
+
+  // Show filter telemetry only when at least one point was rejected
+  if (rejectedCount > 0) {
+    lines.push(`FILTRATI: ${rejectedCount}`);
+    // Amber for a few rejections, red for many (possible systematic issue)
+    lineColors.push(
+      rejectedCount < 5
+        ? "rgba(251, 191, 36, 0.95)"  // amber — occasional, normal
+        : "rgba(239, 68,  68, 0.95)", // red   — frequent, worth investigating
+    );
+  }
 
   const maxW  = Math.max(...lines.map((l) => ctx.measureText(l).width));
   const boxW  = maxW + PAD * 2;
@@ -841,7 +858,8 @@ export function FootEraserCanvas({
    * Used for incremental height triangulation without touching the parent's ref.
    * Reset when the eraser is reset (detected via totalConsumed reaching 0 in draw loop).
    */
-  const localObsRef    = useRef<ObservationData[]>([]);
+  const localObsRef      = useRef<ObservationData[]>([]);
+  const rejectedCountRef = useRef<number>(0);
   /** Maximum foot height estimated via ray-ray triangulation, in mm. 0 = no data yet. */
   const maxHeightMmRef = useRef<number>(0);
 
@@ -919,6 +937,7 @@ export function FootEraserCanvas({
       if (eraser.totalConsumed === 0 && localObsRef.current.length > 0) {
         localObsRef.current    = [];
         maxHeightMmRef.current = 0;
+        rejectedCountRef.current = 0;
       }
       if (w === 0 || h === 0) { rafRef.current = requestAnimationFrame(draw); return; }
 
@@ -1282,25 +1301,39 @@ export function FootEraserCanvas({
                   dotWorldPos:          [worldPt.wx, worldPt.wy, worldPt.wz],
                   timestamp:            now,
                 };
-                cb(obs);
 
-                // ── Incremental height triangulation ─────────────────────
-                // Pair the new observation with every previous one to find
-                // camera-ray intersections inside the dome (= foot surface).
-                const newH = triangulateMaxHeight(obs, localObsRef.current);
-                localObsRef.current.push(obs);
-                if (newH > maxHeightMmRef.current) {
-                  maxHeightMmRef.current = newH;
+                // ── Statistical outlier filter ────────────────────────────
+                // Reject observations where the pose estimate glitched (TPU /
+                // skin reflections, partial occlusion, motion blur).  Filtered
+                // points still count toward visual progress but are not stored.
+                const filterResult = isObservationOutlier(obs, localObsRef.current);
+                if (filterResult.outlier) {
+                  rejectedCountRef.current += 1;
+                  console.warn(
+                    `[NEUMA] Outlier scartato (dotId=${dot.id}): ${filterResult.reason}` +
+                    ` | totale scartati=${rejectedCountRef.current}`,
+                  );
+                } else {
+                  cb(obs);
+
+                  // ── Incremental height triangulation ──────────────────
+                  // Pair the new observation with every previous one to find
+                  // camera-ray intersections inside the dome (= foot surface).
+                  const newH = triangulateMaxHeight(obs, localObsRef.current);
+                  localObsRef.current.push(obs);
+                  if (newH > maxHeightMmRef.current) {
+                    maxHeightMmRef.current = newH;
+                    console.log(
+                      `[NEUMA] Altezza piede aggiornata: ${newH.toFixed(1)} mm` +
+                      ` (da ${localObsRef.current.length} osservazioni)`,
+                    );
+                  }
+
                   console.log(
-                    `[NEUMA] Altezza piede aggiornata: ${newH.toFixed(1)} mm` +
-                    ` (da ${localObsRef.current.length} osservazioni)`,
+                    `Punto di osservazione salvato per il pallino ID: ${dot.id}` +
+                    ` | pos=(${cameraWorldPos.map((v) => v.toFixed(3)).join(", ")})m`,
                   );
                 }
-
-                console.log(
-                  `Punto di osservazione salvato per il pallino ID: ${dot.id}` +
-                  ` | pos=(${cameraWorldPos.map((v) => v.toFixed(3)).join(", ")})m`,
-                );
               }
             }
           }
@@ -1537,6 +1570,7 @@ export function FootEraserCanvas({
         precisionMm,
         tier,
         maxHeightMmRef.current > 0 ? maxHeightMmRef.current : null,
+        rejectedCountRef.current,
       );
 
       rafRef.current = requestAnimationFrame(draw);
