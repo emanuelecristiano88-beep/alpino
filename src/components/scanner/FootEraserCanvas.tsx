@@ -548,6 +548,68 @@ function triangulateMaxHeight(
 interface AnimatingPoint { id: number; sx: number; sy: number; diedAt: number; }
 interface FpsClock { lastAt: number; fps: number; framesSince: number; lastCalcAt: number; }
 
+// ─── Live foot-measurement helpers ───────────────────────────────────────────
+
+/**
+ * Foot dimensions estimated incrementally from the captured dome-point cloud.
+ *
+ * Coordinate system (world space, Y-up):
+ *   X = right, along the A4 long axis (297 mm) → foot LENGTH axis.
+ *   Z = forward, along the A4 short axis (210 mm) → foot WIDTH axis.
+ *   Y = up, vertical above sheet → used for instep HEIGHT (via triangulation).
+ *
+ * L and W use the same low-elevation filter + empirical scale factors as
+ * finalizeScanData.ts (see that file's header for the full derivation).
+ */
+export interface FootMetricsLive { lMm: number; wMm: number; }
+
+/** Vertical threshold for "low-elevation" dome points used in metric calc. */
+const LOW_EL_THRESH_M = 0.15; // metres — same constant as finalizeScanData
+/** Empirical scale: equator X-range ≈431 mm → ~260 mm adult foot length. */
+const METRIC_LENGTH_SCALE = 0.60;
+/** Empirical scale: equator Z-range ≈431 mm → ~96 mm adult foot width. */
+const METRIC_WIDTH_SCALE  = 0.22;
+
+/**
+ * Compute live foot length (L) and width (W) from a snapshot of the
+ * captured foot cloud (`capturedFootCloud`).
+ *
+ * Returns null when fewer than 3 low-elevation points have been captured
+ * (not enough coverage for a stable estimate yet).
+ *
+ * @param cloud  Array of dome-point world positions [wx, wy, wz] in metres,
+ *               collected from ObservationData.dotWorldPos as each dot is
+ *               erased.  Named `capturedFootCloud` in the calling context.
+ */
+function calculateFootMetrics(
+  cloud: ReadonlyArray<[number, number, number]>,
+): FootMetricsLive | null {
+  // Keep only near-equator points (wy < LOW_EL_THRESH).
+  // These have the widest X/Z spread and best represent lateral foot extent.
+  let xMin = Infinity, xMax = -Infinity;
+  let zMin = Infinity, zMax = -Infinity;
+  let lowCount = 0;
+
+  for (const [wx, wy, wz] of cloud) {
+    if (wy >= LOW_EL_THRESH_M) continue;
+    lowCount++;
+    if (wx < xMin) xMin = wx;
+    if (wx > xMax) xMax = wx;
+    if (wz < zMin) zMin = wz;
+    if (wz > zMax) zMax = wz;
+  }
+
+  if (lowCount < 3) return null;
+
+  const xRangeMm = (xMax - xMin) * 1000; // metres → mm
+  const zRangeMm = (zMax - zMin) * 1000;
+
+  return {
+    lMm: Math.round(Math.min(340, Math.max(0, xRangeMm * METRIC_LENGTH_SCALE))),
+    wMm: Math.round(Math.min(140, Math.max(0, zRangeMm * METRIC_WIDTH_SCALE))),
+  };
+}
+
 // ─── Mirino draw helper ───────────────────────────────────────────────────────
 
 /**
@@ -662,6 +724,11 @@ function drawDebugBox(
    * filter.  Hidden when 0 to keep the box uncluttered.
    */
   rejectedCount: number,
+  /**
+   * Live foot-dimension estimate (null until ≥ 3 low-elevation dome points
+   * have been captured).  Drives the "L / W / H" telemetry lines.
+   */
+  footMetrics: FootMetricsLive | null,
 ) {
   const PAD   = 10;
   const FONT  = "12px ui-monospace, monospace";
@@ -742,6 +809,33 @@ function drawDebugBox(
         ? "rgba(251, 191, 36, 0.95)"  // amber — occasional, normal
         : "rgba(239, 68,  68, 0.95)", // red   — frequent, worth investigating
     );
+  }
+
+  // ── Live foot metrics (capturedFootCloud) ─────────────────────────────────
+  //
+  // L  = heel-to-toe length (dome X-axis spread × empirical factor)
+  // W  = metatarsal width   (dome Z-axis spread × empirical factor)
+  // H  = instep height      (ray-ray triangulation, = maxHeightMm)
+  //
+  // Shown only once enough low-elevation points have been captured (≥ 3).
+  // Uses the same algorithm as finalizeScanData so the live numbers match
+  // the final summary screen.
+  if (footMetrics) {
+    const hStr = (maxHeightMm !== null && maxHeightMm > 10)
+      ? `${maxHeightMm.toFixed(0)}`
+      : "—";
+    // Separator
+    lines.push("──────────────");
+    lineColors.push("rgba(255,255,255,0.20)");
+    // Foot length
+    lines.push(`L: ${footMetrics.lMm} mm`);
+    lineColors.push("rgba(134, 239, 172, 0.95)"); // mint green
+    // Foot width
+    lines.push(`W: ${footMetrics.wMm} mm`);
+    lineColors.push("rgba(134, 239, 172, 0.95)");
+    // Instep height (from triangulation)
+    lines.push(`H: ${hStr} mm`);
+    lineColors.push("rgba(134, 239, 172, 0.95)");
   }
 
   const maxW  = Math.max(...lines.map((l) => ctx.measureText(l).width));
@@ -882,6 +976,16 @@ export function FootEraserCanvas({
   /** Maximum foot height estimated via ray-ray triangulation, in mm. 0 = no data yet. */
   const maxHeightMmRef = useRef<number>(0);
 
+  /**
+   * `capturedFootCloud` — the dome-point world positions [wx, wy, wz] (metres)
+   * collected so far in this scan pass, one entry per accepted erased dot.
+   * Populated alongside `localObsRef`; reset when the scan resets.
+   * Used by `calculateFootMetrics` for live L/W telemetry.
+   */
+  const footCloudRef       = useRef<[number, number, number][]>([]);
+  /** Latest L/W estimate from calculateFootMetrics — null until ≥3 low-elev points. */
+  const liveFootMetricsRef = useRef<FootMetricsLive | null>(null);
+
   useEffect(() => { quadsRef.current = markerQuads; }, [markerQuads]);
   useEffect(() => { onPointCapturedRef.current = onPointCaptured; }, [onPointCaptured]);
   useEffect(() => { motionBlurBlockingRef.current = motionBlurBlocking; }, [motionBlurBlocking]);
@@ -954,9 +1058,13 @@ export function FootEraserCanvas({
       // ── Scan-reset detection — clear local triangulation state ───────────
       // eraser.totalConsumed going back to 0 means the user pressed "Rifai".
       if (eraser.totalConsumed === 0 && localObsRef.current.length > 0) {
-        localObsRef.current    = [];
-        maxHeightMmRef.current = 0;
+        localObsRef.current      = [];
+        maxHeightMmRef.current   = 0;
         rejectedCountRef.current = 0;
+        // Reset capturedFootCloud so metrics start fresh on a new scan pass
+        footCloudRef.current       = [];
+        liveFootMetricsRef.current = null;
+        lastStandingMsgRef.current = null;
       }
       if (w === 0 || h === 0) { rafRef.current = requestAnimationFrame(draw); return; }
 
@@ -1391,6 +1499,17 @@ export function FootEraserCanvas({
                   // camera-ray intersections inside the dome (= foot surface).
                   const newH = triangulateMaxHeight(obs, localObsRef.current);
                   localObsRef.current.push(obs);
+
+                  // ── capturedFootCloud update ──────────────────────────────
+                  // Append the dome point's world position to the foot cloud
+                  // and recompute live L/W metrics (O(n), n ≤ 150 — very fast).
+                  footCloudRef.current.push(
+                    obs.dotWorldPos as [number, number, number],
+                  );
+                  liveFootMetricsRef.current = calculateFootMetrics(
+                    footCloudRef.current,
+                  );
+
                   if (newH > maxHeightMmRef.current) {
                     maxHeightMmRef.current = newH;
                     console.log(
@@ -1661,6 +1780,7 @@ export function FootEraserCanvas({
         tier,
         maxHeightMmRef.current > 0 ? maxHeightMmRef.current : null,
         rejectedCountRef.current,
+        liveFootMetricsRef.current,
       );
 
       rafRef.current = requestAnimationFrame(draw);
