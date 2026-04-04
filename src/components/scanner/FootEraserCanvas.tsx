@@ -61,6 +61,17 @@ const C_MIRINO       = "rgba(255, 255, 255, 0.80)";
 const C_MIRINO_GHOST = "rgba(255, 255, 255, 0.52)"; // dimmed during ghost window
 const C_MIRINO_LO    = "rgba(255, 255, 255, 0.28)"; // very dim when fully lost
 const C_MIRINO_BLUR  = "rgba(251, 191, 36, 0.90)";  // amber — motion-blur blocked
+const C_MIRINO_STAND = "rgba(239, 68,  68, 0.90)";  // red   — standing / tilt blocked
+
+// ─── Standing-check thresholds ────────────────────────────────────────────────
+
+/** Minimum camera height (metres) above the A4 sheet. Below this the user is
+ *  likely seated, which under-loads the foot. */
+const STANDING_MIN_HEIGHT_M = 0.85;
+
+/** Minimum downward-look angle (degrees from horizontal). Below this the phone
+ *  is held nearly upright / parallel to the ground and markers cannot be seen. */
+const TILT_MIN_DEG = 30;
 
 /**
  * After tracking loss, keep the last smoothed pose and continue projecting
@@ -851,7 +862,15 @@ export function FootEraserCanvas({
    */
   const lowPowerRef            = useRef<boolean>(false);
 
-  const motionBlurBlockingRef = useRef(motionBlurBlocking);
+  const motionBlurBlockingRef  = useRef(motionBlurBlocking);
+  /** True when the camera Y-height is below STANDING_MIN_HEIGHT_M (user sitting). */
+  const standingBlockedRef     = useRef<boolean>(false);
+  /** True when the camera downward-look angle is below TILT_MIN_DEG (phone too upright). */
+  const tiltBlockedRef         = useRef<boolean>(false);
+  /** DOM div for the standing / tilt warning pill (mutated in RAF, no React state). */
+  const standingWarnDivRef     = useRef<HTMLDivElement | null>(null);
+  /** Last message pushed to standingWarnDivRef — change-detection optimisation. */
+  const lastStandingMsgRef     = useRef<string | null>(null);
 
   /**
    * Local mirror of all ObservationData captured in this scan pass.
@@ -1176,6 +1195,16 @@ export function FootEraserCanvas({
         }
         prevCamPosRef.current = camPos;
         prevCamTimeRef.current = now;
+
+        // ── Standing & tilt check ─────────────────────────────────────────
+        // camPos[1] = camera height above the A4 sheet plane (world Y, metres).
+        standingBlockedRef.current = camPos[1] < STANDING_MIN_HEIGHT_M;
+
+        // lookDirWorld = 3rd row of R (world-space optical axis, Y-down = looking at floor).
+        // lookDirWorld[1] = R[7].  −R[7] > 0 means camera faces downward.
+        const lookDownComp = -(smoothedPoseRef.current.R[7]);
+        const tiltDeg      = Math.asin(Math.max(-1, Math.min(1, lookDownComp))) * (180 / Math.PI);
+        tiltBlockedRef.current = tiltDeg < TILT_MIN_DEG;
       } else if (!trackingOk) {
         // Full loss: reset so there's no stale spike when tracking recovers
         prevCamPosRef.current = null;
@@ -1256,6 +1285,41 @@ export function FootEraserCanvas({
         }
       }
 
+      // ── 3c. Standing / tilt warning DOM update ───────────────────────────
+      //
+      // Higher-severity than the regular guidance pill — shown at screen centre
+      // with a distinct red (sitting) or amber (tilt) accent.
+      // Does NOT share the hold-timer; disappears the instant the condition clears.
+      {
+        const isStandBlock = standingBlockedRef.current;
+        const isTiltBlock  = tiltBlockedRef.current;
+        const standMsg: string | null = eraser.isComplete
+          ? null
+          : isStandBlock
+            ? "Alzati in piedi per misurare il carico reale del piede"
+            : isTiltBlock
+              ? "Inclina il dispositivo verso il basso (45–60°)"
+              : null;
+
+        if (standMsg !== lastStandingMsgRef.current) {
+          lastStandingMsgRef.current = standMsg;
+          const wdiv = standingWarnDivRef.current;
+          if (wdiv) {
+            if (!standMsg) {
+              wdiv.style.opacity   = "0";
+              wdiv.style.transform = "translateX(-50%) translateY(-50%) scale(0.88)";
+            } else {
+              wdiv.style.borderColor = isStandBlock
+                ? "rgba(239, 68, 68, 0.55)"
+                : "rgba(251, 191, 36, 0.55)";
+              wdiv.textContent     = standMsg;
+              wdiv.style.opacity   = "1";
+              wdiv.style.transform = "translateX(-50%) translateY(-50%) scale(1)";
+            }
+          }
+        }
+      }
+
       // ── 4. Classify dots: done / scanning / idle ──────────────────────────
       //
       // Erasure (mirino hit detection) only fires when tracking is LIVE.
@@ -1269,7 +1333,13 @@ export function FootEraserCanvas({
 
       for (const dot of projectedAll) {
         const d2 = (dot.sx - cx) ** 2 + (dot.sy - cy) ** 2;
-        if (trackingLive && !motionBlurBlockingRef.current && d2 <= MIRINO_RADIUS_PX ** 2) {
+        if (
+          trackingLive &&
+          !motionBlurBlockingRef.current &&
+          !standingBlockedRef.current &&
+          !tiltBlockedRef.current &&
+          d2 <= MIRINO_RADIUS_PX ** 2
+        ) {
           doneIds.push(dot.id);
 
           // Queue the death animation (only once per dot)
@@ -1518,39 +1588,59 @@ export function FootEraserCanvas({
       //   LIVE  → full white (C_MIRINO)
       //   GHOST → half-dim (C_MIRINO_GHOST) — dots frozen, no new erasure
       //   LOST  → very dim (C_MIRINO_LO)
-      const mirinoBlocked = motionBlurBlockingRef.current;
-      const mirinoColor = mirinoBlocked
-        ? C_MIRINO_BLUR
-        : trackingLive
-          ? C_MIRINO
-          : trackingGhost
-            ? C_MIRINO_GHOST
-            : C_MIRINO_LO;
+      // Mirino colour priority:
+      //   red   (C_MIRINO_STAND) — standing or tilt blocked (highest)
+      //   amber (C_MIRINO_BLUR)  — motion-blur blocked
+      //   white (C_MIRINO)       — tracking live, all clear
+      //   dimmed variants        — ghost / fully lost
+      const mirinoBlocked    = motionBlurBlockingRef.current;
+      const anyPostureBlock  = standingBlockedRef.current || tiltBlockedRef.current;
+      const mirinoColor = anyPostureBlock
+        ? C_MIRINO_STAND
+        : mirinoBlocked
+          ? C_MIRINO_BLUR
+          : trackingLive
+            ? C_MIRINO
+            : trackingGhost
+              ? C_MIRINO_GHOST
+              : C_MIRINO_LO;
       drawMirino(ctx, cx, cy, MIRINO_RADIUS_PX, mirinoColor);
 
-      // ── 10b. "Rallenta" badge — shown only when motion-blur blocks erasure ─
-      if (mirinoBlocked && trackingLive) {
+      // ── 10b. Badge above mirino for any active block ──────────────────────
+      //   "In piedi"  (red)   — user seated
+      //   "Inclina"   (amber) — phone too upright
+      //   "Rallenta"  (amber) — motion blur
+      const badgeLabel = standingBlockedRef.current
+        ? "In piedi"
+        : tiltBlockedRef.current
+          ? "Inclina"
+          : mirinoBlocked
+            ? "Rallenta"
+            : null;
+
+      if (badgeLabel && trackingLive) {
         ctx.save();
-        const badgeY  = cy - MIRINO_RADIUS_PX - 14;
-        const label   = "Rallenta";
-        ctx.font      = "bold 11px ui-rounded, -apple-system, sans-serif";
-        const tw      = ctx.measureText(label).width;
-        const pad     = 8;
-        const bx      = cx - tw / 2 - pad;
-        const bw      = tw + pad * 2;
+        const badgeY      = cy - MIRINO_RADIUS_PX - 14;
+        const isRed       = badgeLabel === "In piedi";
+        const badgeColor  = isRed ? "239, 68, 68" : "251, 191, 36";
+        ctx.font          = "bold 11px ui-rounded, -apple-system, sans-serif";
+        const tw          = ctx.measureText(badgeLabel).width;
+        const pad         = 8;
+        const bx          = cx - tw / 2 - pad;
+        const bw          = tw + pad * 2;
         // Pill background
-        ctx.fillStyle    = "rgba(251, 191, 36, 0.18)";
-        ctx.strokeStyle  = "rgba(251, 191, 36, 0.60)";
-        ctx.lineWidth    = 1;
+        ctx.fillStyle     = `rgba(${badgeColor}, 0.18)`;
+        ctx.strokeStyle   = `rgba(${badgeColor}, 0.60)`;
+        ctx.lineWidth     = 1;
         const br = 6;
         ctx.beginPath();
         ctx.roundRect(bx, badgeY - 11, bw, 18, br);
         ctx.fill();
         ctx.stroke();
         // Text
-        ctx.fillStyle = "rgba(251, 191, 36, 0.95)";
+        ctx.fillStyle  = `rgba(${badgeColor}, 0.95)`;
         ctx.textAlign  = "center";
-        ctx.fillText(label, cx, badgeY + 2);
+        ctx.fillText(badgeLabel, cx, badgeY + 2);
         ctx.restore();
       }
 
@@ -1637,6 +1727,45 @@ export function FootEraserCanvas({
           userSelect: "none",
           // Subtle text shadow for legibility over bright video
           textShadow: "0 1px 4px rgba(0,0,0,0.5)",
+        }}
+      />
+
+      {/*
+       * Standing / tilt warning — centred on screen, more prominent than the
+       * guidance pill.  Opacity and transform are mutated in the RAF loop only
+       * when the message changes, to keep this zero-cost at 60 fps.
+       *
+       * Starts hidden (opacity 0, slightly scaled-down).
+       */}
+      <div
+        ref={standingWarnDivRef}
+        aria-live="assertive"
+        style={{
+          position:             "absolute",
+          top:                  "50%",
+          left:                 "50%",
+          transform:            "translateX(-50%) translateY(-50%) scale(0.88)",
+          zIndex:               31,
+          opacity:              0,
+          transition:           "opacity 0.28s ease, transform 0.38s cubic-bezier(0.34, 1.56, 0.64, 1)",
+          // Glass-morphism pill
+          background:           "rgba(14, 14, 16, 0.82)",
+          backdropFilter:       "blur(24px) saturate(180%)",
+          WebkitBackdropFilter: "blur(24px) saturate(180%)",
+          border:               "1.5px solid rgba(239, 68, 68, 0.50)",
+          borderRadius:         18,
+          padding:              "16px 28px",
+          // Typography
+          fontFamily:   "ui-rounded, -apple-system, BlinkMacSystemFont, sans-serif",
+          fontWeight:   600,
+          fontSize:     15,
+          color:        "rgba(255, 255, 255, 0.93)",
+          letterSpacing:"0.01em",
+          textAlign:    "center",
+          maxWidth:     300,
+          lineHeight:   "1.45",
+          pointerEvents:"none",
+          userSelect:   "none",
         }}
       />
     </>
