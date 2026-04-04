@@ -610,6 +610,92 @@ function calculateFootMetrics(
   };
 }
 
+// ─── Multi-sample mirino capture ───────────────────────────────────────────────
+
+const MULTI_SAMPLE_COUNT       = 5;
+const MULTI_SAMPLE_WINDOW_MS   = 200;
+/** Max deviation of any sample from the centroid (mm); above → discard + double haptic. */
+const MULTI_SAMPLE_MAX_SPREAD_MM = 2;
+const MULTI_SAMPLE_WEIGHTS     = [1, 2, 3, 4, 5] as const;
+
+type PendingMultiSample = { t0: number; samples: ObservationData[] };
+
+/**
+ * Largest Euclidean distance from the unweighted centroid of camera positions
+ * (metres → mm).  Measures handshake / pose-estimate jitter across the burst.
+ */
+function maxSpreadFromCentroidMm(samples: ReadonlyArray<ObservationData>): number {
+  const n = samples.length;
+  if (n === 0) return 0;
+  let mx = 0, my = 0, mz = 0;
+  for (const s of samples) {
+    mx += s.cameraWorldPos[0];
+    my += s.cameraWorldPos[1];
+    mz += s.cameraWorldPos[2];
+  }
+  mx /= n;
+  my /= n;
+  mz /= n;
+  let maxD = 0;
+  for (const s of samples) {
+    const d = Math.hypot(
+      s.cameraWorldPos[0] - mx,
+      s.cameraWorldPos[1] - my,
+      s.cameraWorldPos[2] - mz,
+    );
+    if (d > maxD) maxD = d;
+  }
+  return maxD * 1000;
+}
+
+/**
+ * Fuse N raw observations into one — weighted mean on position & look vector,
+ * element-mean on R then Gram–Schmidt orthonormalise (same as pose EMA).
+ */
+function mergeWeightedObservations(
+  samples: ReadonlyArray<ObservationData>,
+  timestamp: number,
+): ObservationData {
+  const n = samples.length;
+  const w = MULTI_SAMPLE_WEIGHTS;
+  let wSum = 0;
+  for (let i = 0; i < n; i++) wSum += w[i];
+
+  let cx = 0, cy = 0, cz = 0;
+  let lx = 0, ly = 0, lz = 0;
+  const Racc = [0, 0, 0, 0, 0, 0, 0, 0, 0];
+  for (let i = 0; i < n; i++) {
+    const wi = w[i] / wSum;
+    const s  = samples[i];
+    cx += wi * s.cameraWorldPos[0];
+    cy += wi * s.cameraWorldPos[1];
+    cz += wi * s.cameraWorldPos[2];
+    lx += wi * s.lookDirWorld[0];
+    ly += wi * s.lookDirWorld[1];
+    lz += wi * s.lookDirWorld[2];
+    for (let j = 0; j < 9; j++) Racc[j] += wi * s.cameraRotationMatrix[j];
+  }
+  const llen = Math.hypot(lx, ly, lz) || 1;
+  const lookDirWorld: [number, number, number] = [lx / llen, ly / llen, lz / llen];
+
+  const first = samples[0];
+  return {
+    dotId:                first.dotId,
+    cameraWorldPos:       [cx, cy, cz],
+    lookDirWorld,
+    cameraRotationMatrix: orthonormalize(Racc),
+    dotWorldPos:          [...first.dotWorldPos] as [number, number, number],
+    timestamp,
+  };
+}
+
+function triggerMultiSampleRejectHaptic(): void {
+  try {
+    // Two distinct pulses — "ripassa più lentamente"
+    window.navigator.vibrate?.([32, 55, 32, 55, 32]);
+  } catch { /* ignore */ }
+}
+
 // ─── Mirino draw helper ───────────────────────────────────────────────────────
 
 /**
@@ -986,6 +1072,12 @@ export function FootEraserCanvas({
   /** Latest L/W estimate from calculateFootMetrics — null until ≥3 low-elev points. */
   const liveFootMetricsRef = useRef<FootMetricsLive | null>(null);
 
+  /**
+   * Per-dot mirino multi-sample state: 5 readings over 200 ms before commit.
+   * Cleared when the dot leaves the mirino or on scan reset.
+   */
+  const pendingMultiSampleRef = useRef<Map<number, PendingMultiSample>>(new Map());
+
   useEffect(() => { quadsRef.current = markerQuads; }, [markerQuads]);
   useEffect(() => { onPointCapturedRef.current = onPointCaptured; }, [onPointCaptured]);
   useEffect(() => { motionBlurBlockingRef.current = motionBlurBlocking; }, [motionBlurBlocking]);
@@ -1065,6 +1157,7 @@ export function FootEraserCanvas({
         footCloudRef.current       = [];
         liveFootMetricsRef.current = null;
         lastStandingMsgRef.current = null;
+        pendingMultiSampleRef.current.clear();
       }
       if (w === 0 || h === 0) { rafRef.current = requestAnimationFrame(draw); return; }
 
@@ -1434,99 +1527,139 @@ export function FootEraserCanvas({
       // During the ghost window the dome is frozen at the last known position
       // and we do not consume new points — prevents spurious captures while
       // the user is mid-movement and markers briefly disappear.
+      //
+      // Mirino multi-sample: 5 pose readings over 200 ms, weighted merge.
+      // If centroid spread > 2 mm → discard burst, double haptic, dot stays.
       const doneIds:  number[]              = [];
       const scanIds:  number[]              = [];
       const idleDots: typeof projectedAll   = [];
       const scanDots: typeof projectedAll   = [];
 
+      const slotMsMirino =
+        MULTI_SAMPLE_WINDOW_MS / (MULTI_SAMPLE_COUNT - 1);
+      const pendingMs = pendingMultiSampleRef.current;
+
+      const buildMirinoObservation = (dotId: number): ObservationData | null => {
+        const pose = smoothedPoseRef.current;
+        if (!pose) return null;
+        const worldPt = eraser.remainingPoints.find((p) => p.id === dotId);
+        if (!worldPt) return null;
+        const { R, t } = pose;
+        const cameraWorldPos = computeCameraWorldPos(R, t);
+        const lookDirWorld: [number, number, number] = [R[6], R[7], R[8]];
+        return {
+          dotId,
+          cameraWorldPos,
+          lookDirWorld,
+          cameraRotationMatrix: [...R],
+          dotWorldPos:          [worldPt.wx, worldPt.wy, worldPt.wz],
+          timestamp:            now,
+        };
+      };
+
       for (const dot of projectedAll) {
         const d2 = (dot.sx - cx) ** 2 + (dot.sy - cy) ** 2;
-        if (
+        const inMirino =
           trackingLive &&
           !motionBlurBlockingRef.current &&
           !standingBlockedRef.current &&
           !tiltBlockedRef.current &&
-          d2 <= MIRINO_RADIUS_PX ** 2
-        ) {
+          d2 <= MIRINO_RADIUS_PX ** 2;
+
+        if (!inMirino) {
+          pendingMs.delete(dot.id);
+        }
+
+        if (inMirino) {
+          const snap = buildMirinoObservation(dot.id);
+          if (!snap) {
+            scanDots.push(dot);
+            continue;
+          }
+
+          let pend = pendingMs.get(dot.id);
+          if (!pend) {
+            pendingMs.set(dot.id, { t0: now, samples: [snap] });
+            scanDots.push(dot);
+            continue;
+          }
+
+          const elapsed = now - pend.t0;
+          if (
+            pend.samples.length < MULTI_SAMPLE_COUNT &&
+            elapsed >= pend.samples.length * slotMsMirino
+          ) {
+            pend.samples.push(snap);
+          }
+
+          if (pend.samples.length < MULTI_SAMPLE_COUNT) {
+            scanDots.push(dot);
+            continue;
+          }
+
+          // ── 5 samples ready: validate spread, then merge or reject ───────
+          pendingMs.delete(dot.id);
+
+          const spreadMm = maxSpreadFromCentroidMm(pend.samples);
+          if (spreadMm > MULTI_SAMPLE_MAX_SPREAD_MM) {
+            triggerMultiSampleRejectHaptic();
+            console.warn(
+              `[NEUMA] Multi-sample scartato (dotId=${dot.id}): spread=${spreadMm.toFixed(2)}mm` +
+              ` (soglia ${MULTI_SAMPLE_MAX_SPREAD_MM}mm) — ripassa più lentamente`,
+            );
+            scanDots.push(dot);
+            continue;
+          }
+
+          const merged = mergeWeightedObservations(pend.samples, now);
           doneIds.push(dot.id);
 
-          // Queue the death animation (only once per dot)
           const alreadyAnimating = animatingPointsRef.current.some((a) => a.id === dot.id);
           if (!alreadyAnimating) {
             animatingPointsRef.current.push({ id: dot.id, sx: dot.sx, sy: dot.sy, diedAt: now });
 
-            // ── Capture observation ─────────────────────────────────────────
-            // Fire once per dot, only when we have a valid smoothed pose.
-            // Camera world position and orientation are expressed in the A4
-            // sheet coordinate system (Y-up, origin = A4 centre).
-            const cb   = onPointCapturedRef.current;
-            const pose = smoothedPoseRef.current;
-            if (cb && pose) {
-              const worldPt = eraser.remainingPoints.find((p) => p.id === dot.id);
-              if (worldPt) {
-                const { R, t } = pose;
-                const cameraWorldPos = computeCameraWorldPos(R, t);
-                // Camera look direction = 3rd row of R (R maps world→cam, so R^T
-                // maps cam→world; the cam Z-axis [0,0,1] in world = col2 of R^T =
-                // row2 of R).
-                const lookDirWorld: [number, number, number] = [R[6], R[7], R[8]];
+            const cb = onPointCapturedRef.current;
+            if (cb) {
+              const filterResult = isObservationOutlier(merged, localObsRef.current);
+              if (filterResult.outlier) {
+                rejectedCountRef.current += 1;
+                console.warn(
+                  `[NEUMA] Outlier scartato (dotId=${dot.id}): ${filterResult.reason}` +
+                  ` | totale scartati=${rejectedCountRef.current}`,
+                );
+              } else {
+                cb(merged);
 
-                const obs: ObservationData = {
-                  dotId:                dot.id,
-                  cameraWorldPos,
-                  lookDirWorld,
-                  cameraRotationMatrix: [...R],
-                  dotWorldPos:          [worldPt.wx, worldPt.wy, worldPt.wz],
-                  timestamp:            now,
-                };
+                const newH = triangulateMaxHeight(merged, localObsRef.current);
+                localObsRef.current.push(merged);
 
-                // ── Statistical outlier filter ────────────────────────────
-                // Reject observations where the pose estimate glitched (TPU /
-                // skin reflections, partial occlusion, motion blur).  Filtered
-                // points still count toward visual progress but are not stored.
-                const filterResult = isObservationOutlier(obs, localObsRef.current);
-                if (filterResult.outlier) {
-                  rejectedCountRef.current += 1;
-                  console.warn(
-                    `[NEUMA] Outlier scartato (dotId=${dot.id}): ${filterResult.reason}` +
-                    ` | totale scartati=${rejectedCountRef.current}`,
-                  );
-                } else {
-                  cb(obs);
+                footCloudRef.current.push(
+                  merged.dotWorldPos as [number, number, number],
+                );
+                liveFootMetricsRef.current = calculateFootMetrics(
+                  footCloudRef.current,
+                );
 
-                  // ── Incremental height triangulation ──────────────────
-                  // Pair the new observation with every previous one to find
-                  // camera-ray intersections inside the dome (= foot surface).
-                  const newH = triangulateMaxHeight(obs, localObsRef.current);
-                  localObsRef.current.push(obs);
-
-                  // ── capturedFootCloud update ──────────────────────────────
-                  // Append the dome point's world position to the foot cloud
-                  // and recompute live L/W metrics (O(n), n ≤ 150 — very fast).
-                  footCloudRef.current.push(
-                    obs.dotWorldPos as [number, number, number],
-                  );
-                  liveFootMetricsRef.current = calculateFootMetrics(
-                    footCloudRef.current,
-                  );
-
-                  if (newH > maxHeightMmRef.current) {
-                    maxHeightMmRef.current = newH;
-                    console.log(
-                      `[NEUMA] Altezza piede aggiornata: ${newH.toFixed(1)} mm` +
-                      ` (da ${localObsRef.current.length} osservazioni)`,
-                    );
-                  }
-
+                if (newH > maxHeightMmRef.current) {
+                  maxHeightMmRef.current = newH;
                   console.log(
-                    `Punto di osservazione salvato per il pallino ID: ${dot.id}` +
-                    ` | pos=(${cameraWorldPos.map((v) => v.toFixed(3)).join(", ")})m`,
+                    `[NEUMA] Altezza piede aggiornata: ${newH.toFixed(1)} mm` +
+                    ` (da ${localObsRef.current.length} osservazioni)`,
                   );
                 }
+
+                console.log(
+                  `Punto di osservazione salvato per il pallino ID: ${dot.id}` +
+                  ` | pos=(${merged.cameraWorldPos.map((v) => v.toFixed(3)).join(", ")})m` +
+                  ` | multi-sample OK (spread≤${MULTI_SAMPLE_MAX_SPREAD_MM}mm)`,
+                );
               }
             }
           }
-        } else if (trackingLive && d2 <= SCAN_RADIUS_PX ** 2) {
+          continue;
+        }
+
+        if (trackingLive && d2 <= SCAN_RADIUS_PX ** 2) {
           scanIds.push(dot.id);
           scanDots.push(dot);
         } else {
