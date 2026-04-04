@@ -17,6 +17,11 @@
  * ── Debug overlay ────────────────────────────────────────────────────────────
  *   Always-on translucent box at bottom-left: FPS (measured in RAF), marker
  *   count, tracking status.  Requested by Emanuele; never removed.
+ *
+ * ── A4 heatmap (invisible) ───────────────────────────────────────────────────
+ *   4×3 grid on the sheet plane: each accepted observation increments the cell
+ *   where the camera ray hits Y=0.  Consumed dome dots reappear at 10 % opacity
+ *   in cells with <10 samples until coverage is sufficient for volumetric use.
  */
 import React, { useEffect, useRef } from "react";
 import type { OpenCvArucoQuad } from "@/hooks/useOpenCvArucoAnalysis";
@@ -696,6 +701,61 @@ function triggerMultiSampleRejectHaptic(): void {
   } catch { /* ignore */ }
 }
 
+// ─── A4 heatmap (invisible coverage grid) ────────────────────────────────────
+//
+// The sheet Y=0 plane is split into NX×NZ cells. Each accepted observation
+// increments the cell where the camera ray first hits the sheet.  Consumed
+// dome dots stay drawn at HEATMAP_GHOST_ALPHA until their cell reaches
+// HEATMAP_MIN_SAMPLES — nudging the user to revisit under-sampled regions
+// (heel, arch, etc.).
+
+const HEATMAP_NX = 4;
+const HEATMAP_NZ = 3;
+const HEATMAP_CELLS = HEATMAP_NX * HEATMAP_NZ;
+/** Accepted scans per cell before ghosts for that zone fully disappear. */
+const HEATMAP_MIN_SAMPLES = 10;
+/** Reminder dots: still visible after erase until local density is sufficient. */
+const HEATMAP_GHOST_ALPHA = 0.10;
+
+const HM_A4_W = 0.297;
+const HM_A4_H = 0.210;
+const HM_HALF_X = HM_A4_W / 2;
+const HM_HALF_Z = HM_A4_H / 2;
+
+interface ConsumedGhostEntry {
+  world: [number, number, number];
+  cell:  number;
+}
+
+/**
+ * Intersection of ray O + t·D with the sheet plane Y=0 (returns XZ in metres).
+ */
+function rayPlaneY0ToXZ(
+  o: readonly [number, number, number],
+  d: readonly [number, number, number],
+): [number, number] | null {
+  const dy = d[1];
+  if (Math.abs(dy) < 1e-6) return null;
+  const t = -o[1] / dy;
+  if (t < 0.02) return null;
+  return [o[0] + t * d[0], o[2] + t * d[2]];
+}
+
+/** Map sheet XZ (metres) to a heatmap cell index 0 … HEATMAP_CELLS−1 (clamped to A4). */
+function xzToHeatmapCellIndex(x: number, z: number): number {
+  const cx = Math.max(-HM_HALF_X + 1e-5, Math.min(HM_HALF_X - 1e-5, x));
+  const cz = Math.max(-HM_HALF_Z + 1e-5, Math.min(HM_HALF_Z - 1e-5, z));
+  const ix = Math.min(
+    HEATMAP_NX - 1,
+    Math.max(0, Math.floor(((cx + HM_HALF_X) / HM_A4_W) * HEATMAP_NX)),
+  );
+  const iz = Math.min(
+    HEATMAP_NZ - 1,
+    Math.max(0, Math.floor(((cz + HM_HALF_Z) / HM_A4_H) * HEATMAP_NZ)),
+  );
+  return iz * HEATMAP_NX + ix;
+}
+
 // ─── Mirino draw helper ───────────────────────────────────────────────────────
 
 /**
@@ -1078,6 +1138,14 @@ export function FootEraserCanvas({
    */
   const pendingMultiSampleRef = useRef<Map<number, PendingMultiSample>>(new Map());
 
+  /** Per-cell accepted scan counts on the A4 plane (invisible heatmap). */
+  const heatmapCountsRef = useRef<Uint16Array>(new Uint16Array(HEATMAP_CELLS));
+  /**
+   * Consumed dome dots: world position + heatmap cell for that capture’s ray hit.
+   * Drawn faintly until heatmapCountsRef[cell] ≥ HEATMAP_MIN_SAMPLES.
+   */
+  const consumedGhostsRef = useRef<Map<number, ConsumedGhostEntry>>(new Map());
+
   useEffect(() => { quadsRef.current = markerQuads; }, [markerQuads]);
   useEffect(() => { onPointCapturedRef.current = onPointCaptured; }, [onPointCaptured]);
   useEffect(() => { motionBlurBlockingRef.current = motionBlurBlocking; }, [motionBlurBlocking]);
@@ -1158,6 +1226,8 @@ export function FootEraserCanvas({
         liveFootMetricsRef.current = null;
         lastStandingMsgRef.current = null;
         pendingMultiSampleRef.current.clear();
+        heatmapCountsRef.current.fill(0);
+        consumedGhostsRef.current.clear();
       }
       if (w === 0 || h === 0) { rafRef.current = requestAnimationFrame(draw); return; }
 
@@ -1618,6 +1688,19 @@ export function FootEraserCanvas({
           if (!alreadyAnimating) {
             animatingPointsRef.current.push({ id: dot.id, sx: dot.sx, sy: dot.sy, diedAt: now });
 
+            // Invisible A4 heatmap: cell from ray ∩ sheet Y=0 (fallback: dome XZ).
+            const hitXZ = rayPlaneY0ToXZ(merged.cameraWorldPos, merged.lookDirWorld);
+            const hmCell  = hitXZ
+              ? xzToHeatmapCellIndex(hitXZ[0], hitXZ[1])
+              : xzToHeatmapCellIndex(
+                  merged.dotWorldPos[0],
+                  merged.dotWorldPos[2],
+                );
+            consumedGhostsRef.current.set(dot.id, {
+              world: [...merged.dotWorldPos] as [number, number, number],
+              cell:  hmCell,
+            });
+
             const cb = onPointCapturedRef.current;
             if (cb) {
               const filterResult = isObservationOutlier(merged, localObsRef.current);
@@ -1628,6 +1711,9 @@ export function FootEraserCanvas({
                   ` | totale scartati=${rejectedCountRef.current}`,
                 );
               } else {
+                const hc = heatmapCountsRef.current;
+                if (hc[hmCell] < 65535) hc[hmCell] += 1;
+
                 cb(merged);
 
                 const newH = triangulateMaxHeight(merged, localObsRef.current);
@@ -1651,7 +1737,8 @@ export function FootEraserCanvas({
                 console.log(
                   `Punto di osservazione salvato per il pallino ID: ${dot.id}` +
                   ` | pos=(${merged.cameraWorldPos.map((v) => v.toFixed(3)).join(", ")})m` +
-                  ` | multi-sample OK (spread≤${MULTI_SAMPLE_MAX_SPREAD_MM}mm)`,
+                  ` | multi-sample OK (spread≤${MULTI_SAMPLE_MAX_SPREAD_MM}mm)` +
+                  ` | heatmap cell=${hmCell} count=${hc[hmCell]}`,
                 );
               }
             }
@@ -1752,6 +1839,39 @@ export function FootEraserCanvas({
         ctx.arc(dot.sx, dot.sy, DOT_R_SCAN, 0, Math.PI * 2);
         ctx.fillStyle = C_SCAN;
         ctx.fill();
+      }
+
+      // ── 8b. Heatmap ghost dots — under-covered A4 zones (invisible grid) ─
+      //
+      // Each accepted scan increments a cell where the camera ray hits Y=0.
+      // Consumed dome vertices stay at HEATMAP_GHOST_ALPHA until that cell
+      // reaches HEATMAP_MIN_SAMPLES, so heel / arch gaps stay visible as hints.
+      // Skip ids still in the death animation to avoid double-draw with animating layer.
+      if (trackingOk && smoothedPoseRef.current && consumedGhostsRef.current.size > 0) {
+        const poseHm   = smoothedPoseRef.current;
+        const heat     = heatmapCountsRef.current;
+        const dyingIds = new Set(animatingPointsRef.current.map((p) => p.id));
+
+        ctx.save();
+        ctx.fillStyle = `rgba(255, 255, 255, ${HEATMAP_GHOST_ALPHA})`;
+        for (const [gid, entry] of consumedGhostsRef.current) {
+          if (dyingIds.has(gid)) continue;
+          if (heat[entry.cell] >= HEATMAP_MIN_SAMPLES) continue;
+
+          const pr = projectPoint3D(entry.world, poseHm, K);
+          if (!pr) continue;
+          const [sx, sy] = pr;
+          if (
+            sortedA4Quad.length === 4 &&
+            !inQuadCW(sx, sy, sortedA4Quad, A4_CLIP_MARGIN_PX)
+          ) {
+            continue;
+          }
+          ctx.beginPath();
+          ctx.arc(sx, sy, DOT_R_IDLE, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        ctx.restore();
       }
 
       // ── 9. animatingPoints — ease-out contraction + fade (250 ms) ────────
